@@ -12,8 +12,9 @@ import { autoUpdateSetting } from './update-reminder.mjs';
 // Board-only update backend. The board never lets a client supply a repository
 // path, URL or command: the server updates its own Git checkout, resolves the
 // remote from that checkout's origin, and only accepts the official project
-// repository. A detached helper performs the long Git/dependency work so the
-// MCP HTTP response can answer "updating" long before the caller's 10s limit.
+// repository under its current or legacy account name. A detached helper
+// performs the long Git/dependency work so the MCP HTTP response can answer
+// "updating" long before the caller's 10s limit.
 export const UPDATE_STATE_FILE = 'plugin-update.json';
 export const UPDATE_LOCK_FILE = 'plugin-update.lock';
 export const UPDATE_STATUSES = Object.freeze([
@@ -21,7 +22,13 @@ export const UPDATE_STATUSES = Object.freeze([
 ]);
 
 const STATE_VERSION = 1;
-const OFFICIAL_REPOSITORY = 'heystarlink/codex-to-agents';
+// The public repository moved from the legacy heystarlink account to
+// sneezeforever; GitHub's API confirms both names resolve to the same
+// repository ID. Accept both exact owner/repo identifiers and show the current
+// canonical name in user-facing messages. Other owners, repositories, hosts,
+// extra paths and option-like strings stay rejected.
+const OFFICIAL_REPOSITORIES = Object.freeze(['sneezeforever/codex-to-agents', 'heystarlink/codex-to-agents']);
+const OFFICIAL_REPOSITORY = OFFICIAL_REPOSITORIES[0];
 const ACTIVE_STATES = new Set(['checking', 'updating']);
 const RUNNING_ORDERS = new Set(['queued', 'dispatching', 'executing']);
 const LOCK_STALE_MS = 30 * 60 * 1000;
@@ -422,7 +429,7 @@ export function isOfficialOrigin(value) {
   }
   if (host.toLowerCase() !== 'github.com') return false;
   const normalized = path.replace(/\.git$/i, '').replace(/\/+$/, '').toLowerCase();
-  return normalized === OFFICIAL_REPOSITORY;
+  return OFFICIAL_REPOSITORIES.includes(normalized);
 }
 
 async function repoRootOf(deps) {
@@ -448,7 +455,7 @@ async function originOf(deps) {
   const origin = await git(deps, ['config', '--get', 'remote.origin.url'], { allowFailure: true });
   const value = origin.ok ? origin.stdout.trim() : '';
   if (!isOfficialOrigin(value)) {
-    throw blocked('origin', `origin 不是 ${OFFICIAL_REPOSITORY} 官方仓库，已停止更新。`);
+    throw blocked('origin', `origin 不是官方仓库 ${OFFICIAL_REPOSITORY}（兼容旧地址 heystarlink/codex-to-agents），已停止更新。`);
   }
   return value;
 }

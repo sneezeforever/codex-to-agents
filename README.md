@@ -2,9 +2,15 @@
 
 **让 Codex 指挥 agents 干活。**
 
+**简体中文** | [English](README.en.md)
+
+Codex 多 Agent 派工插件：把具体编码任务交给 **DeepSeek Harness（DSH）**、**Hermes Agent CN Desktop** 或 **Qoder CLI（Qoder）**，由 Codex 负责规划、跟进与验收。Agents 看板可设置执行端、模型、思考强度与权限，管理 SDD 任务文档，并提供插件更新入口。
+
+**English:** Codex to Agents is a Codex plugin that delegates concrete coding tasks to DeepSeek Harness (DSH), Hermes Agent CN Desktop, or Qoder CLI, while Codex plans, follows up, and verifies the results. A local dashboard lets you select the executor, model, reasoning effort, and permissions, and manage SDD task documents and plugin updates.
+
 > **已经 clone 安装过？** 旧版需要先[手动升级一次](docs/upgrading.md)。升级后，打开 Agents 看板会每天最多自动检查一次更新，有新版时在「插件更新」提示；也可在这里开启默认关闭的「自动更新」。
 
-在 Codex 里提需求，把具体工作交给 **Hermes**、**DeepSeek Harness（DSH）** 或 **Qoder CLI（Qoder）**，再回到同一个会话查看进度、继续追问、验收产物。
+在 Codex 里提需求，把具体工作交给所选执行端，再回到同一个会话查看进度、继续追问、验收产物。
 
 你控制派工开关和执行端，Codex 负责拆解与验收，Agent 负责实际执行。需要派工时，在 Codex 左侧的 **Agents 看板**打开开关；关闭后，继续按原来的方式使用 Codex。
 
@@ -70,7 +76,7 @@ SOL 在 Codex 中做关键决策，执行 Agent 负责高频交付：
 模型账号和用量由执行端管理。首次使用自动派工，需要在 Codex 审核并信任插件 Hook；派工开关默认关闭。
 
 ```bash
-git clone https://github.com/heystarlink/codex-to-agents.git
+git clone https://github.com/sneezeforever/codex-to-agents.git
 cd codex-to-agents
 npm ci
 mkdir -p "$HOME/codex-agents-demo"
@@ -232,6 +238,21 @@ SDD 任务文档有独立开关，位于看板设置区、始终可见，默认�
 SDD 文档目录只存放任务约定，不是代码目录；派工时的工作目录仍指向实际代码项目。切换文档目录后查看新目录中的文档，原目录文件保留。
 
 ## 常见问题
+
+### Codex 如何调用 DeepSeek / Qoder？
+
+先按[安装与接入](#安装与接入)接入执行端，再在 Agents 看板选择执行端并打开「自动派工」。之后 Codex 会在开发、修复和测试任务中按开关派工；也可以在消息里明确要求交给 DSH、Hermes 或 Qoder。各执行端的命令、模型与限制见[安装与接入](#安装与接入)和[进阶配置](docs/advanced.md#配置执行端)。
+
+### 找不到 `codex` 命令怎么办
+
+`enable`、`disable` 和 `plugin-install` 都支持 `--codex`。把 Codex CLI 的绝对路径传给命令即可，例如：
+
+```bash
+node src/command.mjs plugin-install --codex /绝对路径/codex
+node src/command.mjs enable --executor hermes \
+  --directory "$HOME/codex-agents-demo" \
+  --codex /绝对路径/codex
+```
 
 ### 看板已安装，但没有入口或没有自动派工
 

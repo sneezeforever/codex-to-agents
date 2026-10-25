@@ -12,6 +12,6 @@
 
 之前通过 clone 安装的旧版没有检测代码，需要先按[升级教程](upgrading.md)手动更新并刷新本地安装。升级时沿用原来的安装参数，DSH 用户记得刷新插件后重启一下 DSH。
 
-[项目与教程](https://github.com/heystarlink/codex-to-agents) · [升级步骤](https://github.com/heystarlink/codex-to-agents/blob/main/docs/upgrading.md)
+[项目与教程](https://github.com/sneezeforever/codex-to-agents) · [升级步骤](https://github.com/sneezeforever/codex-to-agents/blob/main/docs/upgrading.md)
 
 遇到问题欢迎提 issue，也谢谢大家帮忙试用 🙏

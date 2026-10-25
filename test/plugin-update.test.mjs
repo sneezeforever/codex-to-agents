@@ -296,21 +296,45 @@ test('a branch other than the remote default branch is refused', async t => {
   assert.match(state.message, /main/);
 });
 
-test('remote failures are reported honestly and the origin must be official', async t => {
+test('official origin accepts the current and legacy repository identifiers', () => {
+  for (const owner of ['sneezeforever', 'heystarlink']) {
+    for (const value of [
+      `git@github.com:${owner}/codex-to-agents.git`,
+      `git@github.com:${owner}/codex-to-agents`,
+      `https://github.com/${owner}/codex-to-agents.git`,
+      `https://github.com/${owner}/codex-to-agents`,
+      `ssh://git@github.com/${owner}/codex-to-agents.git`,
+      `ssh://git@github.com/${owner}/codex-to-agents`,
+    ]) assert.equal(isOfficialOrigin(value), true, value);
+  }
   for (const value of [
-    'git@github.com:heystarlink/codex-to-agents.git',
-    'git@github.com:heystarlink/codex-to-agents',
-    'https://github.com/heystarlink/codex-to-agents.git',
-    'https://github.com/heystarlink/codex-to-agents',
-    'ssh://git@github.com/heystarlink/codex-to-agents.git',
-  ]) assert.equal(isOfficialOrigin(value), true, value);
-  for (const value of [
+    // Other owners and repositories, including the other repository under an
+    // official owner, stay rejected.
     'git@github.com:someone/codex-to-agents.git',
+    'https://github.com/other/codex-to-agents',
     'https://github.com/heystarlink/another.git',
+    'https://github.com/sneezeforever/another.git',
+    // Look-alike hosts, embedded credentials and other hosts are not trusted.
     'https://gitlab.com/heystarlink/codex-to-agents.git',
-    '/tmp/local-origin.git', '', null, '-uhttps://github.com/heystarlink/codex-to-agents.git',
+    'https://gitlab.com/sneezeforever/codex-to-agents.git',
+    'https://github.com.evil.example/sneezeforever/codex-to-agents.git',
+    'https://github.com@evil.example/sneezeforever/codex-to-agents.git',
+    // Extra paths, suffixes and option-like strings are not accepted.
+    'https://github.com/sneezeforever/codex-to-agents/tree/main',
+    'https://github.com/sneezeforever/codex-to-agents.git/extra',
+    'https://github.com/sneezeforever/codex-to-agents.git --upload-pack=evil',
+    'https://github.com/sneezeforever/codex-to-agents.git%20--upload-pack=evil',
+    // Non-Git, insecure, local and empty values remain rejected.
+    '/tmp/local-origin.git',
+    'file:///tmp/codex-to-agents.git',
+    'git://github.com/sneezeforever/codex-to-agents.git',
+    '   ', '', null, undefined,
+    '-uhttps://github.com/sneezeforever/codex-to-agents.git',
+    '--upload-pack=evil https://github.com/sneezeforever/codex-to-agents.git',
   ]) assert.equal(isOfficialOrigin(value), false, String(value));
+});
 
+test('remote failures are reported honestly and the origin must be official', async t => {
   const repo = await repository(t);
   const offline = await check(repo.home, repo.dependencies({
     remote: 'https://127.0.0.1:1/codex-to-agents.git',
@@ -323,6 +347,7 @@ test('remote failures are reported honestly and the origin must be official', as
   const untrusted = await check(repo.home, repo.dependencies({ remote: null }));
   assert.equal(untrusted.status, 'blocked');
   assert.equal(untrusted.reason, 'origin');
+  assert.match(untrusted.message, /sneezeforever\/codex-to-agents/);
   assert.match(untrusted.message, /heystarlink\/codex-to-agents/);
 });
 
