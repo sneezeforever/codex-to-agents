@@ -2,8 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -13,9 +15,10 @@ import { preparePlugin } from '../src/plugin.mjs';
 import { backendAuth, backendStatus, connectionConfig, stopBackend } from '../src/backend-control.mjs';
 import { TRANSPORT_FILE, readTransport, resolveTransport, saveTransport } from '../src/transport.mjs';
 import { PANEL_URI } from '../src/panel.mjs';
+import { OrderBook } from '../src/orders.mjs';
 
 const fixtureCli = fileURLToPath(new URL('./fixtures/codex-cli.mjs', import.meta.url));
-const MODEL_TOOLS = ['conversation_control', 'runtime_info', 'sdd_task', 'work_inspect', 'work_submit', 'work_update', 'workspace_control'];
+const MODEL_TOOLS = ['conversation_control', 'runtime_info', 'sdd_task', 'work_inspect', 'work_submit', 'work_update', 'work_wait', 'workspace_control'];
 const BOARD_TOOLS = ['open_panel', 'panel_sdd', 'panel_settings', 'panel_snapshot', 'panel_update', 'panel_usage'];
 const NEW_ENV = ['HOME', 'CODEX_HOME'];
 
@@ -372,6 +375,97 @@ test('HTTP board connection keeps loopback auth and rejects missing credentials 
     assert.equal((await modelClient.callTool({ name: 'work_inspect', arguments: {} })).structuredContent.total, 0);
   } finally {
     await closeClients(clients);
+    await stopBackend(home).catch(() => {});
+  }
+});
+
+async function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); }
+    catch (error) { if (error.code === 'ESRCH') return true; throw error; }
+    await delay(25);
+  }
+  return false;
+}
+
+test('stdio bridge cancels a pending work_wait, keeps serving later queries, and exits on EOF without stopping the backend', { timeout: 30000 }, async t => {
+  const { home } = await fixture(t);
+  const book = new OrderBook(home);await book.open();
+  const order = await book.submit('work_submit', { goal: 'stdio bridge wait fixture' });
+  const connection = await connectionConfig(home, 'stdio', '/mcp');
+  const client = new Client({ name: 'stdio-bridge-cancel', version: '1.0' });
+  let pid;
+  try {
+    const transport = new StdioClientTransport({ command: connection.command, args: connection.args, stderr: 'pipe' });
+    await client.connect(transport);
+    pid = transport.pid;
+    const controller = new AbortController();
+    const rejection = client.callTool({ name: 'work_wait', arguments: { order_id: order.order_id, timeout_ms: 10000 } }, undefined, { signal: controller.signal })
+      .then(() => null, error => error);
+    await delay(200);
+    const abortedAt = Date.now();
+    controller.abort();
+    assert.ok(await rejection, 'the client abort rejects its own pending wait');
+    // Regression: the bridge used to await the long HTTP observation in its
+    // read loop, so this query sat behind it and hit the client timeout.
+    const listed = await client.listTools({}, { timeout: 1500 });
+    const queryMs = Date.now() - abortedAt;
+    assert.ok(listed.tools.some(tool => tool.name === 'work_wait'));
+    assert.ok(queryMs < 1200, `a query after abort must return promptly, took ${queryMs}ms`);
+    assert.equal((await book.inspect(order.order_id)).status, 'queued', 'cancelling a wait never cancels, replays or mutates the order');
+
+    // EOF while another observation is pending: release it, exit the bridge,
+    // but keep the shared backend alive for other clients.
+    const inFlight = client.callTool({ name: 'work_wait', arguments: { order_id: order.order_id, timeout_ms: 10000 } })
+      .then(() => null, error => error);
+    await delay(150);
+    await client.close();
+    await inFlight;
+    assert.equal(await waitForProcessExit(pid, 3000), true, 'stdin EOF lets the bridge exit on its own');
+    assert.equal((await backendStatus(home)).online, true, 'closing the bridge never stops the shared backend');
+    const fresh = new Client({ name: 'stdio-bridge-after-eof', version: '1.0' });
+    try {
+      await fresh.connect(new StdioClientTransport({ command: connection.command, args: connection.args, stderr: 'pipe' }));
+      assert.ok((await fresh.listTools({}, { timeout: 1500 })).tools.some(tool => tool.name === 'work_wait'));
+      assert.equal((await book.inspect(order.order_id)).status, 'queued');
+    } finally { await fresh.close().catch(() => {}); }
+    // The aborted observation must not leave a watcher/timer in the backend:
+    // once the backend is asked to stop, its process has to exit normally.
+    const backendPid = (await backendStatus(home)).pid;
+    await stopBackend(home).catch(() => {});
+    assert.equal(await waitForProcessExit(backendPid, 3000), true, 'the backend exits after stop, so no aborted observation kept it alive');
+  } finally {
+    await client.close().catch(() => {});
+    await stopBackend(home).catch(() => {});
+  }
+});
+
+test('stdio bridge keeps stdout protocol-only on malformed input and exits cleanly on EOF', { timeout: 20000 }, async t => {
+  const { home } = await fixture(t);
+  const connection = await connectionConfig(home, 'stdio', '/mcp');
+  const child = spawn(connection.command, connection.args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  let stdout = '';let stderr = '';
+  child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const exited = new Promise(resolve => child.once('close', code => resolve(code)));
+  try {
+    child.stdin.write('this is not json\n');
+    child.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n');
+    await delay(400);
+    assert.equal(stdout, '', 'invalid or notification frames never write noise to stdout');
+    child.stdin.end();
+    const code = await Promise.race([exited, delay(4000, 'timeout')]);
+    assert.equal(code, 0, `the bridge exits on stdin EOF${stderr ? `: ${stderr.trim().slice(0, 300)}` : ''}`);
+    assert.equal(stdout, '', 'the EOF shutdown stays silent on stdout');
+    assert.equal((await backendStatus(home)).online, true, 'an EOF shutdown leaves the shared backend running');
+    const backendPid = (await backendStatus(home)).pid;
+    await stopBackend(home).catch(() => {});
+    assert.equal(await waitForProcessExit(backendPid, 3000), true, 'the backend exits cleanly after the bridge EOF');
+  } finally {
+    child.stdin.destroy();
+    child.kill();
     await stopBackend(home).catch(() => {});
   }
 });

@@ -28,6 +28,8 @@ async function tool(name, args = {}) {
   if (response.isError) throw new Error(response.content.map(block => block.text ?? '').join('\n'));
   return response.structuredContent;
 }
+// Polling only needs the bounded summary; the native final result is fetched
+// with an explicit detail view only where it is asserted.
 async function complete(id) {
   for (let attempt = 0; attempt < 180; attempt++) {
     const state = await tool('work_inspect', { order_id: id });
@@ -38,6 +40,7 @@ async function complete(id) {
   }
   throw new Error(`Hermes work order did not finish: ${id}`);
 }
+const detail = id => tool('work_inspect', { order_id: id, view: 'detail' });
 async function operation(name, args) { return complete((await tool(name, args)).order_id); }
 try {
   const probe = new HermesClient({ url: values['hermes-url'] });
@@ -56,7 +59,8 @@ try {
   await client.connect(transport());
   const done = await complete(queued.order_id);conversation = done.conversation_id;
   assert.equal(await readFile(join(directory, 'hello.txt'), 'utf8'), 'HERMES_OK\n');
-  assert.equal(done.executor, 'hermes');assert.ok(done.output.text.includes('HERMES_DONE'));
+  const doneDetail = await detail(queued.order_id);
+  assert.equal(done.executor, 'hermes');assert.ok(doneDetail.output.text.includes('HERMES_DONE'));
   assert.equal((await tool('runtime_info', { executor: 'hermes' })).online, true);
   report.checks.push('A real MCP client caused Hermes to create the expected file and received the native final result');
   const again = await tool('work_submit', payload);
@@ -65,9 +69,10 @@ try {
   const first = await tool('work_update', { target_order: queued.order_id, action: 'append', message: '不要调用工具，只回复 HERMES_FIRST。' });
   const second = await tool('work_update', { target_order: queued.order_id, action: 'append', message: '不要调用工具，只回复 HERMES_SECOND。' });
   const one = await complete(first.order_id);const two = await complete(second.order_id);
+  const oneDetail = await detail(first.order_id);const twoDetail = await detail(second.order_id);
   assert.equal(one.executor, 'hermes');assert.equal(two.conversation_id, conversation);
-  assert.ok(one.output.text.includes('HERMES_FIRST'));assert.ok(!one.output.text.includes('HERMES_SECOND'));
-  assert.ok(two.output.text.includes('HERMES_SECOND'));
+  assert.ok(oneDetail.output.text.includes('HERMES_FIRST'));assert.ok(!oneDetail.output.text.includes('HERMES_SECOND'));
+  assert.ok(twoDetail.output.text.includes('HERMES_SECOND'));
   report.checks.push('Two same-session follow-ups inherit Hermes and return independent results in order');
   const previousPid = (await tool('runtime_info', { executor: 'hermes' })).snapshot.pid;
   const standby = new Client({ name: 'codex-to-agents-hermes-standby-check', version: '1.0' });
@@ -86,7 +91,7 @@ try {
   await operation('conversation_control', { executor: 'hermes', action: 'rename', conversation_id: conversation, title: `Hermes 已验收 ${queued.order_id.slice(0, 8)}` });
   await operation('conversation_control', { executor: 'hermes', action: 'archive', conversation_id: conversation });
   await operation('conversation_control', { executor: 'hermes', action: 'restore', conversation_id: conversation });
-  const list = await operation('conversation_control', { executor: 'hermes', action: 'list' });
+  const list = await detail((await operation('conversation_control', { executor: 'hermes', action: 'list' })).order_id);
   assert.ok(list.output.conversations.some(item => item.id === conversation));
   report.checks.push('Native conversation rename, archive, restore and list succeed');
   report.passed = true;report.conversation_id = conversation;

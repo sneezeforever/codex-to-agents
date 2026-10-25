@@ -95,7 +95,9 @@ test('submission uses the verified CLI surface, streams progress and keeps the n
   for (const forbidden of ['--max-turns', '--permission-mode', '--yolo', '--dangerously-skip-permissions', '--reasoning-effort', '--input-format']) {
     assert.ok(!invocation.argv.includes(forbidden), `must not pass ${forbidden}`);
   }
-  assert.equal(invocation.stdin.trim(), 'implement the feature');
+  // The shared delivery convention follows the original task message.
+  assert.ok(invocation.stdin.startsWith('implement the feature\n\n交付要求'), 'the original message stays the prefix');
+  assert.match(invocation.stdin, /验证命令与退出码|验证命令/);
   assert.equal(invocation.output_format, 'stream-json');
   assert.equal(invocation.cwd, await realpath(f.directory));
 

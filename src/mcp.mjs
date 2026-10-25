@@ -6,8 +6,13 @@ import { EXECUTORS } from './executors.mjs';
 import { readDelegation, assertPermissionDispatchable } from './delegation.mjs';
 import { registerSddTask } from './sdd-tools.mjs';
 import { createRecentOrderReader } from './recent-orders.mjs';
+import {
+  OrderObserver, compactRuntimes, summarizeOrder,
+  WAIT_DEFAULT_TIMEOUT_MS, WAIT_MAX_TIMEOUT_MS,
+} from './work-observation.mjs';
 
 const response = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value });
+const WAIT_ORDER_ID_DESCRIPTION = 'UUID of a saved work order to wait for. Must be an order_id returned by work_submit or work_update; task titles and cw- conversation IDs are not valid.';
 
 export async function createMcp(home, { panelOnly = false, onOrder, onRuntime, snapshot, onSettings, onPanel, onUsage, recentOrders } = {}) {
   const book = new OrderBook(home);
@@ -19,19 +24,25 @@ export async function createMcp(home, { panelOnly = false, onOrder, onRuntime, s
     return server;
   }
   const listing = recentOrders ?? createRecentOrderReader(home);
-  if (!recentOrders) {
-    // The protocol callback covers peer/transport disconnects; explicit close
-    // also awaits cleanup when no transport has ever been connected.
-    const onclose = server.server.onclose;
-    server.server.onclose = () => {
-      onclose?.();
-      void listing.close().catch(error => console.error(error.message));
-    };
-    const close = server.close.bind(server);
-    server.close = async () => {
-      try { await close(); } finally { await listing.close(); }
-    };
-  }
+  const observer = new OrderObserver(home);
+  let closing = null;
+  const cleanup = () => {
+    // An in-flight work_wait holds file watchers, timers and listeners; a
+    // disconnect, server.close or explicit close must release all of them.
+    observer.close();
+    if (recentOrders) return Promise.resolve();
+    return listing.close().catch(error => console.error(error.message));
+  };
+  // The protocol callback covers peer/transport disconnects; explicit close also
+  // awaits cleanup when no transport has ever been connected.
+  const onclose = server.server.onclose;
+  server.server.onclose = (...args) => {
+    try { onclose?.(...args); } finally { void cleanup(); }
+  };
+  const close = server.close.bind(server);
+  server.close = () => closing ??= (async () => {
+    try { await close(); } finally { await cleanup(); }
+  })();
   for (const [kind, definition] of Object.entries(definitions)) {
     server.registerTool(kind, {
       description: definition.text, inputSchema: definition.schema,
@@ -57,16 +68,38 @@ export async function createMcp(home, { panelOnly = false, onOrder, onRuntime, s
   // this one reuses the same storage contract but cannot set the workspace.
   registerSddTask(server, home);
   server.registerTool('work_inspect', {
-    description: 'Read a saved work order with executor, progress, conversation ID and output. Without order_id list recent work orders. Works while execution agents are offline.',
-    inputSchema: z.object({ order_id: inspectOrderId, limit: z.number().int().min(1).max(50).default(10) }).strict(),
+    description: 'Read a saved work order with executor, progress, conversation ID and result. The default view "summary" is a bounded overview (short progress/error/result and worker online state); pass view:"detail" for the complete events, output and model catalog. Without order_id list recent work orders. Works while execution agents are offline.',
+    inputSchema: z.object({
+      order_id: inspectOrderId,
+      view: z.enum(['summary', 'detail']).default('summary')
+        .describe('summary (default) returns a bounded overview; detail returns the complete saved record.'),
+      limit: z.number().int().min(1).max(50).default(10),
+    }).strict(),
     annotations: { readOnlyHint: true, openWorldHint: false },
-  }, async ({ order_id, limit }) => {
+  }, async ({ order_id, view, limit }) => {
     try {
       if (order_id) {
         const state = await book.inspect(order_id);
-        return response({ ...state, worker: await book.runtime(null, state.executor) });
+        const worker = await book.runtime(null, state.executor);
+        if (view === 'detail') return response({ ...state, worker });
+        return response(summarizeOrder(state, worker));
       }
-      return response(await listing.list(limit));
+      const page = await listing.list(limit);
+      // Liveness only: the full model catalog belongs to runtime_info.
+      return response({ ...page, worker: compactRuntimes(page.worker) });
+    } catch (error) { return { isError: true, content: [{ type: 'text', text: error.message }] }; }
+  });
+  server.registerTool('work_wait', {
+    description: `Wait read-only for one saved work order to reach a terminal state (completed, failed, cancelled or blocked). Returns the bounded summary with timed_out=false on a terminal state; an uncertain order returns immediately with needs_attention=true; otherwise returns timed_out=true with the current bounded summary after timeout_ms (0-${WAIT_MAX_TIMEOUT_MS}, default ${WAIT_DEFAULT_TIMEOUT_MS}). It never submits, replays or cancels work, and an offline executor is not completion. Waiting is bounded to this single call.`,
+    inputSchema: z.object({
+      order_id: z.uuid({ error: WAIT_ORDER_ID_DESCRIPTION }).describe(WAIT_ORDER_ID_DESCRIPTION),
+      timeout_ms: z.number().int().min(0).max(WAIT_MAX_TIMEOUT_MS).default(WAIT_DEFAULT_TIMEOUT_MS)
+        .describe(`Maximum wait in milliseconds. 0 returns the current bounded summary without waiting.`),
+    }).strict(),
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  }, async ({ order_id, timeout_ms }, extra) => {
+    try {
+      return response(await observer.wait(order_id, { timeoutMs: timeout_ms, signal: extra?.signal }));
     } catch (error) { return { isError: true, content: [{ type: 'text', text: error.message }] }; }
   });
   server.registerTool('runtime_info', {

@@ -4,12 +4,23 @@ import { mkdtemp, rm, writeFile, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { request } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { ensureBackend, stopBackend, backendAuth, backendStatus } from '../src/backend-control.mjs';
 import { lazyHermes } from '../src/hermes-loader.mjs';
 import { lazyQoder } from '../src/qoder-loader.mjs';
 import { OrderBook } from '../src/orders.mjs';
+
+async function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { process.kill(pid, 0); }
+    catch (error) { if (error.code === 'ESRCH') return true; throw error; }
+    await delay(25);
+  }
+  return false;
+}
 
 async function fixture(t) {
   const home = await mkdtemp('/tmp/cta-backend-');
@@ -35,7 +46,7 @@ test('concurrent startup and HTTP clients share one backend; connection close an
   try {
     const [a, b, panel] = await Promise.all([connect('/mcp'), connect('/mcp'), connect('/board')]);
     assert.deepEqual((await a.listTools()).tools.map(tool => tool.name).sort(),
-      ['conversation_control', 'runtime_info', 'sdd_task', 'work_inspect', 'work_submit', 'work_update', 'workspace_control']);
+      ['conversation_control', 'runtime_info', 'sdd_task', 'work_inspect', 'work_submit', 'work_update', 'work_wait', 'workspace_control']);
     assert.deepEqual((await panel.listTools()).tools.map(tool => tool.name).sort(), ['open_panel', 'panel_sdd', 'panel_settings', 'panel_snapshot', 'panel_update', 'panel_usage']);
     const payload = { order_id: randomUUID(), goal: 'offline shared work' };
     const submitted = await Promise.all([a, b].map(client => client.callTool({ name: 'work_submit', arguments: payload })));
@@ -144,4 +155,55 @@ test('a runtime query can initialize Hermes before the first order; settings cha
     assert.deepEqual(closed, started);
   } finally { await loader.close(); }
   assert.deepEqual(closed, started);
+});
+
+test('HTTP work_wait abort and client disconnect release the observation and keep the backend serving', { timeout: 30000 }, async t => {
+  const home = await fixture(t);
+  const backend = await ensureBackend(home);
+  const headers = await backendAuth(home);
+  const book = new OrderBook(home);await book.open();
+  const order = await book.submit('work_submit', { goal: 'http wait abort fixture' });
+  const clients = [];
+  const connect = async name => {
+    const client = new Client({ name, version: '1.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(backend.url + '/mcp'), { requestInit: { headers } }));
+    clients.push(client);return client;
+  };
+  try {
+    const client = await connect('http-wait-abort');
+    const controller = new AbortController();
+    const rejection = client.callTool({ name: 'work_wait', arguments: { order_id: order.order_id, timeout_ms: 10000 } }, undefined, { signal: controller.signal })
+      .then(() => null, error => error);
+    await delay(200);
+    const abortedAt = Date.now();
+    controller.abort();
+    assert.ok(await rejection, 'the HTTP caller abort rejects its pending wait');
+    const inspect = await client.callTool({ name: 'work_inspect', arguments: { order_id: order.order_id } }, undefined, { timeout: 1500 });
+    const queryMs = Date.now() - abortedAt;
+    assert.equal(inspect.structuredContent.status, 'queued');
+    assert.ok(queryMs < 1200, `an HTTP query after abort must return promptly, took ${queryMs}ms`);
+    // Disconnect while another observation is in flight; a fresh HTTP client
+    // must still be served promptly and the order must stay untouched.
+    const inFlight = client.callTool({ name: 'work_wait', arguments: { order_id: order.order_id, timeout_ms: 10000 } })
+      .then(() => null, error => error);
+    await delay(150);
+    await client.close();
+    await inFlight;
+    const fresh = await connect('http-wait-abort-after-disconnect');
+    const freshAt = Date.now();
+    const listed = await fresh.listTools({}, { timeout: 1500 });
+    assert.ok(listed.tools.some(tool => tool.name === 'work_wait'));
+    assert.ok(Date.now() - freshAt < 1200, 'a fresh client is served after the previous one disconnects');
+    assert.equal((await backendStatus(home)).online, true);
+    const zero = await fresh.callTool({ name: 'work_wait', arguments: { order_id: order.order_id, timeout_ms: 0 } }, undefined, { timeout: 1500 });
+    assert.equal(zero.structuredContent.timed_out, true);
+    assert.equal((await book.inspect(order.order_id)).status, 'queued', 'abort/disconnect never cancels or mutates the work order');
+    // Aborted observations must not keep the backend process alive after stop.
+    const backendPid = (await backendStatus(home)).pid;
+    await stopBackend(home).catch(() => {});
+    assert.equal(await waitForProcessExit(backendPid, 3000), true, 'the backend exits after stop, so no aborted observation kept it alive');
+  } finally {
+    for (const client of clients) await client.close().catch(() => {});
+    await stopBackend(home).catch(() => {});
+  }
 });

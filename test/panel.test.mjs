@@ -72,6 +72,11 @@ test('delegation defaults OFF without creating files; ON/OFF only changes prefer
   assert.match(context, /不得假称已保存/);
   assert.match(context, /跳过或不需要文档时遵从/);
   assert.match(context, /sdd_task 缺失或保存失败/);
+  // Follow-up guidance stays bounded: the default summary plus a single bounded
+  // wait replaces repeated polling, and a timeout is not success.
+  assert.match(context, /work_wait/);
+  assert.match(context, /view: ?"detail"|摘要/);
+  assert.match(context, /timed_out|超时/);
   const phases = ['1. 分析', '2. 保存', '3. 仅规划', '4. 路径交接与派工', '5. 同一任务更新', '6. 边界']
     .map(phase => context.indexOf(phase));
   assert.ok(phases.every(index => index >= 0), 'the hook is split into explicit phases');
@@ -80,6 +85,7 @@ test('delegation defaults OFF without creating files; ON/OFF only changes prefer
   assert.match(planningOnly, /即结束/);
   assert.match(planningOnly, /不继续以下派工步骤/);
   assert.ok(!planningOnly.includes('work_inspect'), 'planning-only guidance stops before the dispatch step');
+  assert.ok(!planningOnly.includes('work_wait'), 'planning-only guidance does not introduce waiting');
   assert.ok(!context.includes('set_workspace'), 'the hook must not invite the model to switch the document root');
   // With SDD explicitly OFF, an OFF delegation context gives no document steps.
   await runSddAction(home, { action: 'set_enabled', enabled: false });
@@ -113,6 +119,10 @@ test('the SDD and delegation switches drive four independent hook combinations',
   assert.match(context, /2\. 保存/);
   assert.match(context, /task\.md 绝对路径/);
   assert.match(context, /work_submit（executor: "hermes"）/);
+  assert.match(context, /work_inspect 的有界摘要/, 'ON+SDD ON prefers the bounded summary');
+  assert.match(context, /view: ?"detail"/);
+  assert.match(context, /work_wait/, 'delegation ON guides a bounded wait instead of polling');
+  assert.match(context, /timed_out|超时/);
 
   // 2. SDD OFF + delegation ON: the old document context is overridden; the
   // dispatch path stays intact with no document/path requirement.
@@ -123,6 +133,13 @@ test('the SDD and delegation switches drive four independent hook combinations',
   assert.match(context, /直接按以下要求派工/);
   assert.match(context, /work_submit（executor: "hermes"）/);
   assert.match(context, /crypto\.randomUUID\(\)/, 'order-id safety still applies without documents');
+  // SDD OFF + delegation ON follows the same summary/detail/wait rules even
+  // though there is no task document to hand over.
+  assert.match(context, /work_inspect 的有界摘要/, 'ON+SDD OFF prefers the bounded summary too');
+  assert.match(context, /view: ?"detail"/);
+  assert.match(context, /work_wait/);
+  assert.match(context, /timed_out|超时/);
+  assert.match(context, /不机械重跑整个测试套件|不机械重跑/);
   assert.ok(!context.includes('sdd_task'), 'OFF SDD must not invite the model to write documents');
   assert.doesNotMatch(context, /task\.md 绝对路径|路径交接与派工|2\. 保存/);
 
@@ -135,6 +152,11 @@ test('the SDD and delegation switches drive four independent hook combinations',
   assert.match(context, /保存后直接交付规划/);
   assert.match(context, /只保存文档不会自动派工/);
   assert.ok(!/使用 work_submit/.test(context), 'planning-only OFF must not instruct a dispatch');
+  // Delegation is OFF: the pure planning guidance must not carry unrelated
+  // waiting/summary instructions.
+  assert.ok(!context.includes('work_wait'), 'planning-only OFF gets no wait guidance');
+  assert.ok(!context.includes('work_inspect'), 'planning-only OFF gets no follow-up guidance');
+  assert.ok(!context.includes('view:"detail"'), 'planning-only OFF gets no detail-view guidance');
 
   // 4. SDD OFF + delegation OFF: neither document nor dispatch guidance.
   await sdd(false);
@@ -143,6 +165,8 @@ test('the SDD and delegation switches drive four independent hook combinations',
   assert.match(context, /本轮不要创建或更新任务文档/);
   assert.ok(!context.includes('sdd_task'));
   assert.ok(!context.includes('work_submit'));
+  assert.ok(!context.includes('work_wait'), 'both switches OFF gets no wait guidance');
+  assert.ok(!context.includes('work_inspect'), 'both switches OFF gets no follow-up guidance');
 
   // A damaged SDD file is treated as OFF and never as the legacy ON default;
   // delegation still works and writes stay blocked.
@@ -779,8 +803,8 @@ test('panel_sdd is app-only, object-schemed, workspace-fenced, revisioned, lazy,
   t.after(async () => { await normalClient.close();await normal.close(); });
   await normal.connect(a);await normalClient.connect(b);
   const names = (await normalClient.listTools()).tools.map(tool => tool.name);
-  assert.deepEqual(names.sort(), ['conversation_control', 'runtime_info', 'sdd_task', 'work_inspect', 'work_submit', 'work_update', 'workspace_control'],
-    'the model sees exactly the dispatch/inspection tools plus sdd_task');
+  assert.deepEqual(names.sort(), ['conversation_control', 'runtime_info', 'sdd_task', 'work_inspect', 'work_submit', 'work_update', 'work_wait', 'workspace_control'],
+    'the model sees exactly the dispatch/inspection tools plus sdd_task and the bounded work_wait');
   assert.ok(!names.includes('panel_sdd'), 'documents are app-only, not a model-visible tool');
   assert.ok(!names.includes('open_panel'));
 

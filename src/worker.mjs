@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { OrderBook, TERMINAL } from './orders.mjs';
 import { isExecutor, leaseFile } from './executors.mjs';
 import { acquireOrderIndex, releaseOrderIndex } from './order-cache.mjs';
+import { withDeliveryGuidance } from './worker-delivery.mjs';
 
 async function lease(home, executor) {
   const file = join(home, leaseFile(executor));
@@ -236,7 +237,7 @@ export class Consumer {
         location = await this.desktop.start(order);
         await this.book.transition(order.id, 'dispatching', location);
         startedDelivery = true;
-        const receipt = await this.desktop.send(order, location, input.goal, 'queue');
+        const receipt = await this.desktop.send(order, location, withDeliveryGuidance('work_submit', undefined, input.goal), 'queue');
         await this.book.transition(order.id, receipt?.status ?? 'executing', receipt ?? { progress: `Message submitted to ${this.executor}.` });
       } else if (order.kind === 'work_update') {
         if (input.action === 'cancel') {
@@ -246,7 +247,7 @@ export class Consumer {
           location = await this.desktop.checkpoint(sessionId);
           await this.book.transition(order.id, 'dispatching', location);
           startedDelivery = true;
-          const receipt = await this.desktop.send(order, location, input.message, input.action === 'interrupt' ? 'steer' : 'queue');
+          const receipt = await this.desktop.send(order, location, withDeliveryGuidance('work_update', input.action, input.message), input.action === 'interrupt' ? 'steer' : 'queue');
           await this.book.transition(order.id, receipt?.status ?? 'executing', receipt ?? { progress: `Follow-up submitted to ${this.executor}.` });
         }
       } else {

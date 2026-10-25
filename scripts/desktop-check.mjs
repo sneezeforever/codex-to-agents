@@ -33,6 +33,8 @@ async function tool(name, arguments_ = {}) {
   if (response.isError) throw new Error(response.content.map(block => block.text ?? '').join('\n'));
   return response.structuredContent;
 }
+// Polling only needs the bounded summary; request the full record explicitly
+// (view: "detail") only where the native result itself is asserted.
 async function complete(id) {
   for (let n = 0; n < 70; n++) {
     const state = await tool('work_inspect', { order_id: id });
@@ -42,6 +44,7 @@ async function complete(id) {
   }
   throw new Error(`Work order did not complete: ${id}`);
 }
+const detail = id => tool('work_inspect', { order_id: id, view: 'detail' });
 async function operation(name, payload) {
   const ack = await tool(name, payload);return complete(ack.order_id);
 }
@@ -55,7 +58,7 @@ try {
   await complete(initial.order_id);
   assert.equal((await tool('runtime_info')).online, true);
   report.checks.push('The desktop consumer picked up the already-saved operation');
-  workspaceId = (await operation('workspace_control', { action: 'register', directory, title: '工作单实机验证' })).output.id;
+  workspaceId = (await detail((await operation('workspace_control', { action: 'register', directory, title: '工作单实机验证' })).order_id)).output.id;
   await operation('workspace_control', { action: 'rename', workspace_id: workspaceId, title: '工作单项目已更名' });
   report.checks.push('Native desktop project registration and rename');
   const payload = { goal: '这是用户授权的工作单系统开发验收。请在当前目录实际创建 hello.txt，内容严格为 WORKORDER_OK 加换行。只写这个文件，不读取其他文件、不运行命令、不访问网络。完成后只回复 DONE。', workspace_id: workspaceId, provider: 'deepseek-account', model: 'deepseek-flash', effort: 'low', title: '工作单写文件' };
@@ -71,10 +74,10 @@ try {
   await operation('conversation_control', { action: 'rename', conversation_id: conversationId, title: '已验收的工作单聊天' });
   await operation('conversation_control', { action: 'archive', conversation_id: conversationId });
   await operation('conversation_control', { action: 'restore', conversation_id: conversationId });
-  const listed = await operation('conversation_control', { action: 'list', workspace_id: workspaceId });
+  const listed = await detail((await operation('conversation_control', { action: 'list', workspace_id: workspaceId })).order_id);
   assert.ok(listed.output.conversations.some(item => item.id === conversationId));
   report.checks.push('Native chat rename, archive, restore and project-filtered list');
-  const followed = await operation('work_update', { target_order: work.order_id, action: 'append', message: '不要调用任何工具，只回复 FOLLOWUP_OK。' });
+  const followed = await detail((await operation('work_update', { target_order: work.order_id, action: 'append', message: '不要调用任何工具，只回复 FOLLOWUP_OK。' })).order_id);
   assert.ok(followed.output.text.includes('FOLLOWUP_OK'));
   report.checks.push('A follow-up order reaches the same desktop chat and has its own result');
   await operation('conversation_control', { action: 'archive', conversation_id: conversationId });

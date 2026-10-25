@@ -103,29 +103,87 @@ export async function connectionConfig(home, transport, path, options) {
   throw new Error('--transport must be stdio or http.');
 }
 
+// The stdio entry is a protocol bridge, not a second execution service: it
+// forwards MCP messages to the same authenticated shared backend. Each message
+// is forwarded concurrently so a long-running read-only call (work_wait) can
+// never block a cancellation notification or a later query. Command and args
+// stay separate so spaces, quotes and non-ASCII data-directory paths never pass
+// through a shell.
+const BRIDGE_MAX_IN_FLIGHT = 64;
+
 export async function bridgeStdio(home, { panelOnly = false, input = process.stdin, output = process.stdout } = {}) {
   const { createInterface } = await import('node:readline');
   const backend = await ensureBackend(home);
+  const url = backend.url + (panelOnly ? '/board' : '/mcp');
   const headers = { ...await backendAuth(home), 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-06-18' };
   const lines = createInterface({ input, crlfDelay: Infinity });
-  for await (const line of lines) {
-    let message;
-    try { message = JSON.parse(line); }
-    catch { continue; }
-    try {
-      const response = await fetch(backend.url + (panelOnly ? '/board' : '/mcp'), {
-        method: 'POST', headers, body: line, redirect: 'error', signal: AbortSignal.timeout(120000),
-      });
-      if (!response.ok) throw new Error('Shared backend rejected the request.');
-      if (response.status !== 202) output.write(await response.text() + '\n');
-    } catch {
-      if (message.id !== undefined) {
-        const messageText = message.method === 'tools/call'
-          ? 'Shared backend could not confirm this operation. Inspect the original work order before retrying.'
-          : 'Shared backend is unavailable. Check backend status and backend.log; the transport was not changed automatically.';
-        output.write(JSON.stringify({ jsonrpc: '2.0', id: message.id,
-          error: { code: -32603, message: messageText } }) + '\n');
+  // Only protocol frames may reach stdout. A failed write (client already gone)
+  // must never surface as console noise.
+  const write = text => {
+    if (!text) return;
+    try { output.write(text.endsWith('\n') ? text : text + '\n'); } catch { /* stdout closed */ }
+  };
+  const failureText = message => message.method === 'tools/call'
+    ? 'Shared backend could not confirm this operation. Inspect the original work order before retrying.'
+    : 'Shared backend is unavailable. Check backend status and backend.log; the transport was not changed automatically.';
+  const errorFrame = (message, text) => JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: text } });
+  // id -> AbortController. A request stays registered until its HTTP response
+  // settles or the client cancels it, so notifications/cancelled can abort the
+  // exact backend observation and let the shared backend release its watcher.
+  const pending = new Map();
+  const jobs = new Set();
+  const forward = (line, entry) => {
+    const job = (async () => {
+      try {
+        const response = await fetch(url, {
+          method: 'POST', headers, body: line, redirect: 'error',
+          signal: entry
+            ? AbortSignal.any([entry.controller.signal, AbortSignal.timeout(120000)])
+            : AbortSignal.timeout(120000),
+        });
+        if (!response.ok) throw new Error('Shared backend rejected the request.');
+        if (response.status !== 202) {
+          const text = await response.text();
+          if (text.trim()) write(text);
+        }
+      } catch (error) {
+        // A client cancellation is not a failure: JSON-RPC requires no response
+        // for it, and the cancelled call was already rejected by the caller.
+        if (entry?.controller.signal.aborted) return;
+        if (entry) write(errorFrame(entry.message, failureText(entry.message)));
+        // Notifications carry no response; forwarding failures stay silent.
+      } finally {
+        if (entry && pending.get(entry.message.id) === entry) pending.delete(entry.message.id);
+        jobs.delete(job);
       }
+    })();
+    jobs.add(job);
+  };
+  try {
+    for await (const line of lines) {
+      let message;
+      try { message = JSON.parse(line); }
+      catch { continue; }
+      if (message?.method === 'notifications/cancelled') {
+        const cancelled = pending.get(message.params?.requestId);
+        if (cancelled) cancelled.controller.abort();
+        continue;
+      }
+      if (message?.id === undefined) { forward(line); continue; }
+      if (pending.size >= BRIDGE_MAX_IN_FLIGHT) {
+        write(errorFrame(message, 'Too many concurrent requests on the stdio bridge.'));
+        continue;
+      }
+      const entry = { message, controller: new AbortController() };
+      pending.set(message.id, entry);
+      forward(line, entry);
     }
+  } finally {
+    // stdin EOF or transport close: abort every forwarded observation and wait
+    // for the HTTP requests to settle, then exit. The shared backend itself is
+    // left running for other clients.
+    for (const entry of pending.values()) entry.controller.abort();
+    pending.clear();
+    await Promise.allSettled([...jobs]);
   }
 }

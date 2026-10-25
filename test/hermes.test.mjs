@@ -164,11 +164,13 @@ test('same-session Hermes follow-ups remain queued until prior work finishes wit
   f.native.event(session, 'message.delta', { text: 'first partial' });
   f.native.complete(session, 'FIRST');await consumer.tick();
   assert.equal((await f.book.inspect(parent.order_id)).output.text, 'FIRST');
-  assert.equal(f.native.prompts.length, 2);assert.ok(f.native.prompts[1].text.endsWith('\nsecond'));
+  assert.equal(f.native.prompts.length, 2);assert.ok(f.native.prompts[1].text.includes('\nsecond'));
+  assert.match(f.native.prompts[1].text, /验证|未验证/, 'the delivery convention follows the follow-up message');
   assert.equal((await f.book.inspect(third.order_id)).status, 'queued');
   f.native.complete(session, 'SECOND');await consumer.tick();
   assert.equal((await f.book.inspect(second.order_id)).output.text, 'SECOND');
-  assert.equal(f.native.prompts.length, 3);assert.ok(f.native.prompts[2].text.endsWith('\nthird'));
+  assert.equal(f.native.prompts.length, 3);assert.ok(f.native.prompts[2].text.includes('\nthird'));
+  assert.match(f.native.prompts[2].text, /验证|未验证/, 'the delivery convention follows the follow-up message');
   f.native.complete(session, 'THIRD');await consumer.tick();
   assert.equal((await f.book.inspect(third.order_id)).output.text, 'THIRD');
   assert.deepEqual(f.native.interrupted, []);

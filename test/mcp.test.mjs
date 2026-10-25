@@ -11,10 +11,10 @@ import { OrderBook } from '../src/orders.mjs';
 import { createMcp } from '../src/mcp.mjs';
 import { stopBackend } from '../src/backend-control.mjs';
 
-const NORMAL_TOOLS = ['conversation_control', 'runtime_info', 'sdd_task', 'work_inspect', 'work_submit', 'work_update', 'workspace_control'];
+const NORMAL_TOOLS = ['conversation_control', 'runtime_info', 'sdd_task', 'work_inspect', 'work_submit', 'work_update', 'work_wait', 'workspace_control'];
 const PLAN = '# 模型完整规划\n\n## 目标\n\n把规划保存到共享文档。\n\n## 范围\n\n只写 SDD 文档，不改代码。\n\n## 计划\n\n1. 读取工作区\n2. 创建任务文档\n\n## 验收条件\n\n- [ ] task.md 与规划一致\n';
 
-test('real MCP stdio exposes exactly seven tools, saves a complete model plan, and supports offline orders', async () => {
+test('real MCP stdio exposes exactly eight tools, saves a complete model plan, and supports offline orders', async () => {
   const home = await mkdtemp('/tmp/cw-mcp-');
   // The shared backend must not send production usage statistics from tests.
   await writeFile(join(home, 'usage-settings.json'), '{"enabled":false}\n');
@@ -22,8 +22,8 @@ test('real MCP stdio exposes exactly seven tools, saves a complete model plan, a
   try {
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/command.mjs', import.meta.url)), 'serve', '--home', home], stderr: 'pipe' }));
     const tools = (await client.listTools()).tools;
-    assert.equal(tools.length, 7);
-    assert.deepEqual(tools.map(tool => tool.name).sort(), NORMAL_TOOLS, 'the model catalog is exactly the six dispatch/inspection tools plus sdd_task');
+    assert.equal(tools.length, 8);
+    assert.deepEqual(tools.map(tool => tool.name).sort(), NORMAL_TOOLS, 'the model catalog is exactly the seven dispatch/inspection tools plus sdd_task');
     assert.equal((await client.callTool({ name: 'runtime_info', arguments: {} })).structuredContent.online, false);
     const workspace = (await client.callTool({ name: 'sdd_task', arguments: { action: 'get_workspace' } })).structuredContent;
     const project = (await client.callTool({ name: 'sdd_task', arguments: {
@@ -38,7 +38,12 @@ test('real MCP stdio exposes exactly seven tools, saves a complete model plan, a
     assert.equal(task.structuredContent.status, 'queued');
     const id = task.structuredContent.order_id;
     const book = new OrderBook(home);await book.transition(id, 'completed', { output: { text: 'verified result' } });
-    const result = await client.callTool({ name: 'work_inspect', arguments: { order_id: id } });
+    const summary = (await client.callTool({ name: 'work_inspect', arguments: { order_id: id } })).structuredContent;
+    assert.equal(summary.status, 'completed');
+    assert.equal(summary.output, undefined, 'the default view never returns the full output body');
+    assert.equal(summary.result, 'verified result');
+    assert.match(summary.detail_hint, /view:"detail"/);
+    const result = await client.callTool({ name: 'work_inspect', arguments: { order_id: id, view: 'detail' } });
     assert.equal(result.structuredContent.output.text, 'verified result');
   } finally { await client.close();await stopBackend(home);await rm(home, { recursive: true, force: true }); }
 });

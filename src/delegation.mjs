@@ -201,7 +201,7 @@ export async function delegationContext(home) {
       `用户在 Agents 看板开启了自动派工，执行端为 ${setting.executor}。${modelPreference}${sddClosedMessage(sdd)}：这取代本会话之前要求保存任务文档的上下文，本轮跳过任务文档保存与 task.md 路径交接，不要尝试创建或更新任务文档（开关关闭时该写入会被拒绝），直接按以下要求派工。`,
       '',
       '1. 分析：先限定目录、文件范围及验收条件；尚未形成可执行规划时先完成规划。普通问答、讨论直接处理，不创建任务文档。',
-      `2. 派工：需要执行时，通过 codex-to-agents 的 runtime_info 检查该执行端，使用 work_submit（executor: "${setting.executor}"${modelArguments}）委派具体工作，并在 goal 中直接写明任务、范围与验收条件，不要求 task.md 路径；用 work_inspect 跟进、独立检查文件和验证结果，后续同任务使用 work_update，沿用原会话模型。`,
+      `2. 派工：需要执行时，通过 codex-to-agents 的 runtime_info 检查该执行端，使用 work_submit（executor: "${setting.executor}"${modelArguments}）委派具体工作，并在 goal 中直接写明任务、范围与验收条件，不要求 task.md 路径；跟进默认用 work_inspect 的有界摘要，只有确需完整 events/output 记录时才传 view:"detail"，等待终态用 work_wait（单次调用由 timeout_ms 限定，最长 55000 ms；超时只是 timed_out，不代表成功或已取消；执行端离线不算完成；不要忙轮询，也不要声称能永久后台唤醒）。完成后先核对 diff 与验证证据，按风险定向读代码；已有相关测试证据且无新改动或疑点时，不机械重跑整个测试套件。后续同任务使用 work_update，沿用原会话模型。`,
       `3. 边界：用户明确表示跳过或不需要文档时遵从。不可扩大原任务权限，执行端离线或工具缺失时说明原因，不静默换端或盲目重复提交。work_submit 的 order_id 可省略并由系统生成；若自行指定，必须在首次提交前用真实 UUID 生成器（例如 crypto.randomUUID()）生成，首次提交与不确定重试沿用同一个 order_id 和完全相同的参数；不得把任务名、cw- 会话 ID 或示例占位符当作 order_id。用户明确要求自行执行或指定其他 agent、模型时遵从用户要求。每次新的自动派工前重新读取 ${JSON.stringify(join(home, 'delegation.json'))}，若已关闭则停止自动派发。不要自行修改开关或新会话权限。`,
     ].join('\n');
   }
@@ -211,7 +211,7 @@ export async function delegationContext(home) {
     '1. 分析：先限定目录、文件范围及验收条件；尚未形成可执行规划时先完成规划。普通问答、讨论不创建任务文档。',
     '2. 保存：任务明确且已形成可执行规划时，调用 sdd_task 保存约定。先用 get_workspace 读取当前工作区；再用 list_projects 或 register_project 按项目名称复用分类（项目只是分类，不能把代码路径当作文档根或项目名）；最后用 create_task 以一次完整非空正文写入目标、范围、计划和验收条件，不要只建模板占位。只保存本次任务的约定，不要把任意聊天消息或内部推理全量写入，也不扫描或改写项目里的其他文档。SDD 文档根仍只由看板设置，不能由工具切换。',
     '3. 仅规划：用户只要求规划时，完成第 2 步并交付规划后即结束，不继续以下派工步骤，不调用 work_submit；只保存文档不会自动派工。',
-    `4. 路径交接与派工：需要执行时，只有拿到第 2 步的真实回执后，才把返回的 task.md 绝对路径显式写进 work_submit 的 goal，并说明以该文档为任务约定；执行工作目录仍由 work_submit 的 directory 或 workspace_id 指向实际代码项目。随后通过 codex-to-agents 的 runtime_info 检查该执行端，使用 work_submit（executor: "${setting.executor}"${modelArguments}）委派具体工作，并用 work_inspect 跟进、独立检查文件和验证结果；后续同任务使用 work_update，沿用原会话模型。`,
+    `4. 路径交接与派工：需要执行时，只有拿到第 2 步的真实回执后，才把返回的 task.md 绝对路径显式写进 work_submit 的 goal，并说明以该文档为任务约定；执行工作目录仍由 work_submit 的 directory 或 workspace_id 指向实际代码项目。随后通过 codex-to-agents 的 runtime_info 检查该执行端，使用 work_submit（executor: "${setting.executor}"${modelArguments}）委派具体工作；跟进默认用 work_inspect 的有界摘要，只有确需完整 events/output 记录时才传 view:"detail"，等待终态用 work_wait（单次调用由 timeout_ms 限定，最长 55000 ms；超时只是 timed_out，不代表成功或已取消；执行端离线不算完成；不要忙轮询，也不要声称能永久后台唤醒）。完成后先核对 diff 与验证证据，按风险定向读代码；已有相关测试证据且无新改动或疑点时，不机械重跑整个测试套件。后续同任务使用 work_update，沿用原会话模型。`,
     '5. 同一任务更新：只复用当前任务已经返回的 workspace_id、project_id、task_id，先 read_task 获取最新 revision，再 save_task 更新原文档。不能因为名称或标题相同就自行认定为同一任务。同一任务不要重复 create_task；不同任务即使同名也分别创建。',
     `6. 边界：用户明确表示跳过或不需要文档时遵从。sdd_task 缺失或保存失败时说明未保存及阻塞原因，不得假称已保存或已完成路径交接。不可扩大原任务权限，执行端离线或工具缺失时说明原因，不静默换端或盲目重复提交。work_submit 的 order_id 可省略并由系统生成；若自行指定，必须在首次提交前用真实 UUID 生成器（例如 crypto.randomUUID()）生成，首次提交与不确定重试沿用同一个 order_id 和完全相同的参数；不得把任务名、cw- 会话 ID 或示例占位符当作 order_id。用户明确要求自行执行或指定其他 agent、模型时遵从用户要求。每次新的自动派工前重新读取 ${JSON.stringify(join(home, 'delegation.json'))}，若已关闭则停止自动派发。不要自行修改开关或新会话权限。`,
   ].join('\n');
