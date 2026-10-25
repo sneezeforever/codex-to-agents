@@ -4,12 +4,17 @@
   "private": true,
   "type": "module",
   "description": "让 Codex 指挥 agents 干活：拆解任务、派工、跟进进度并验收结果。",
-  "engines": { "node": ">=22.19.0" },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
     "start": "node src/command.mjs serve",
     "monitor": "node src/command.mjs monitor",
     "dashboard": "node src/command.mjs monitor --web",
     "test": "node --test test/*.test.mjs"
   },
-  "dependencies": { "@modelcontextprotocol/sdk": "1.31.0", "zod": "4.6.5" }
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "4.6.5"
+  }
 }
