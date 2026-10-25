@@ -24,9 +24,11 @@ npm ci
 
 **沿用初次安装时的参数。** 特别是 `--home`、`--codex`、`--profile`、`--dsh-home`、`--directory`、`--provider`；使用过自定义值时，把原值带回相应命令，不要用默认值覆盖。
 
+旧版没有保存连接传输。升级后如果没有显式选择，重装会采用默认 `stdio`；需要继续使用 HTTP 时，在第一次 `enable` 或 `plugin-install` 命令加上 `--transport http`。显式选择保存在数据目录，之后的重装、看板安装和「插件更新」都会沿用，不需要每次重复。非法或损坏的保存值会报错，不会静默切换。
+
 - 使用 DSH：重新执行自己原来的 `node src/command.mjs enable ...` 命令，刷新 DSH 插件代码快照，随后重启 DSH。
 - 使用 Hermes：插件运行代码直接来自原仓库；若只安装了派工工具、未安装看板，重新执行自己原来的 Hermes `enable` 命令，并按[安装教程](../README.md#3-安装-agents-看板)安装看板。
-- 已安装看板：重新执行 `plugin-install`，让 Codex 载入新的工具与 Hook 配置。
+- 已安装看板：重新执行 `plugin-install`，让 Codex 载入新的工具与 Hook 配置。`enable` 只更新派工连接，不刷新已有看板；需要看板使用同一传输时必须运行 `plugin-install`。
 
 原来使用默认数据目录、且 `codex` 在 PATH 中时，看板安装与后台重启命令如下。使用过 `--home` 或 `--codex` 时，请继续带上自己的原值：
 

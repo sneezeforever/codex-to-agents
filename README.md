@@ -123,11 +123,25 @@ node src/command.mjs enable --executor qoder \
 
 三条路线都会备份配置并注册派工连接；已有其他执行端的配置会保留。`enable` 和 `plugin-install` 都支持 `--codex`，找不到 Codex 命令时用它指定 CLI 路径。
 
+新安装默认使用 **stdio 连接**：Codex 启动本机 Node 桥接，桥接再用本机私有凭据连接共享后台。也可以显式选择 HTTP 直连：
+
+```bash
+node src/command.mjs enable --executor hermes \
+  --directory "$HOME/codex-agents-demo" \
+  --transport http
+```
+
+`--transport stdio|http` 可用于 `enable` 和 `plugin-install`。显式选择会保存在所选数据目录，之后的重装、看板安装和插件更新都会沿用；没有保存过选择时使用 stdio。非法或损坏的保存值会明确报错，不会静默切换。`enable` 只注册派工连接，不会刷新已安装的看板；要让看板也使用同一传输，请再运行一次 `plugin-install`（命令输出也会提示）。
+
+HTTP 直连仍连接本机回环地址，不改变宿主代理设置。如果 Codex 所在环境使用 `ALL_PROXY`/`HTTP_PROXY` 等代理但没有放行 `127.0.0.1`/`localhost`，请使用默认 stdio，或自行在宿主环境中放行回环地址；本工程不会修改你的全局代理变量。连接失败时不会自动换成另一种传输并重放任务，请先核对原工作单再处理。
+
 ### 3. 安装 Agents 看板
 
 ```bash
 node src/command.mjs plugin-install
 ```
+
+如需 HTTP 直连，可在首次安装时写一次 `--transport http`；之后无需重复。安装命令会按保存的连接方式同时生成派工和看板连接。
 
 安装后：
 
@@ -203,6 +217,8 @@ Cloudflare 作为网络服务提供方仍会处理连接信息。服务端不记
 
 同一数据目录下，派工连接和看板共用一个 **`agents-backend`** 后台。打开多个会话不会各自再启动一套执行后台；看板隐藏时暂停界面查询，恢复显示后立即更新，任务继续在后台执行。Hermes 与 Qoder 执行模块按需加载，没有对应配置时不加载；空闲的 Qoder 不常驻 CLI 子进程。
 
+使用默认 stdio 连接时，每个 Codex MCP 连接会多一个轻量的 Node 桥接进程，消息仍转到同一个共享后台，不会为每个会话新建执行消费者。桥接本身也有进程与内存开销，因此 stdio 只是更容易绕过宿主代理，并不承诺比 HTTP 更省内存。HTTP 模式不增加桥接进程，但需要宿主代理放行回环地址。
+
 工作单在后台共享，已完成历史只在文件变化时更新，新任务仍会立即处理。实际占用随模块加载和任务数量变化，可用 `backend status` 查看 PID。
 
 ### 轻量 SDD 共享工作区
@@ -220,6 +236,16 @@ SDD 文档目录只存放任务约定，不是代码目录；派工时的工作�
 ### 看板已安装，但没有入口或没有自动派工
 
 先查看卡片中的 Hook 状态。若显示「待生效」，按提示在 Codex CLI 的 `/hooks` 审核并信任或启用该 Hook。Hook 已信任后，重新加载旧会话；仍未加载插件时，重启 Codex 或新建会话。确认开关已开启，执行端也选对了。
+
+### 开启代理后看板连接失败
+
+如果使用 HTTP 连接时看板提示连接失败，先确认 Codex 所在环境可以直连 `127.0.0.1`。宿主代理没有排除回环地址时，本机请求可能被送往代理并失败。可以改用默认 stdio：
+
+```bash
+node src/command.mjs plugin-install --transport stdio
+```
+
+也可以在宿主环境中把 `127.0.0.1` 和 `localhost` 加入 `NO_PROXY`。本工程不会修改 `ALL_PROXY`、`HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。连接失败后，不要盲目切换传输重放同一任务；先用原工作单编号核对状态。
 
 ### 执行端显示离线怎么办
 

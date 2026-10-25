@@ -4,10 +4,14 @@ import { execFile, spawn } from 'node:child_process';
 import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { OrderBook } from '../src/orders.mjs';
+import { stopBackend } from '../src/backend-control.mjs';
+import { preparePlugin } from '../src/plugin.mjs';
+import { saveTransport } from '../src/transport.mjs';
 import { runBoardUpdate } from '../src/update-reminder.mjs';
-import { claimHelperLock, findNpmCli, finishAbandonedHelper, isOfficialOrigin, refreshDshProfile, runPluginUpdate, UPDATE_LOCK_FILE, UPDATE_STATE_FILE } from '../src/plugin-update.mjs';
+import { claimHelperLock, findNpmCli, finishAbandonedHelper, installProjectUpdate, isOfficialOrigin, refreshDshProfile, runPluginUpdate, UPDATE_LOCK_FILE, UPDATE_STATE_FILE } from '../src/plugin-update.mjs';
 
 // Every fixture is a temporary bare repository plus a clone. Nothing here can
 // touch the real checkout: the updater only ever receives injected fixture
@@ -28,6 +32,49 @@ const git = (cwd, args) => new Promise((resolve, reject) => {
 
 const start = (home, action, dependencies) => runPluginUpdate(home, { action, dependencies });
 const status = home => runPluginUpdate(home, { action: 'status' });
+
+const fixtureCli = fileURLToPath(new URL('./fixtures/codex-cli.mjs', import.meta.url));
+const shellQuote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
+
+// The updater invokes the Codex executable recorded by plugin-install. Point
+// that record at an isolated fixture so the real CLI, user config and plugin
+// cache are never touched.
+async function fakeCodex(root) {
+  const executable = join(root, 'recorded-codex');
+  await writeFile(executable,
+    `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(fixtureCli)} "$@"\n`, { mode: 0o755 });
+  return executable;
+}
+
+function runFixture(executable, args) {
+  return new Promise((resolve, reject) => {
+    execFile(executable, args, { env: process.env, encoding: 'utf8' }, (error, stdout, stderr) => {
+      if (error) reject(new Error((stderr || error.message).trim()));
+      else resolve(stdout);
+    });
+  });
+}
+
+async function isolateCodex(t, root) {
+  const previous = Object.fromEntries(['HOME', 'CODEX_HOME'].map(name => [name, process.env[name]]));
+  const home = join(root, 'isolated-home');
+  const codexHome = join(home, '.codex');
+  await mkdir(codexHome, { recursive: true });
+  process.env.HOME = home;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  return codexHome;
+}
+
+async function boardMode(path) {
+  const manifest = JSON.parse(await readFile(path, 'utf8'));
+  return manifest.mcpServers.agents_board.command ? 'stdio' : 'http';
+}
 
 async function check(home, dependencies) {
   const started = await start(home, 'check', dependencies);
@@ -861,5 +908,57 @@ test('automatic installation still blocks dirty files and running work without c
     const result = await settle(repo.home);
     assert.equal(result.status, 'blocked');assert.equal(result.reason, reason);
     assert.equal(await repo.head(), before);assert.equal(installs, 0);
+  }
+});
+
+test('an applied project update refreshes the board, model endpoint and installed plugin cache with one saved transport', async t => {
+  const repo = await repository(t);
+  const marketplace = join(repo.root, 'marketplace');
+  const dshHome = join(repo.root, 'dsh-home');
+  const codexHome = await isolateCodex(t, repo.root);
+  const recordedCodex = await fakeCodex(repo.root);
+  await mkdir(repo.home, { recursive: true });
+  await writeFile(join(repo.home, 'usage-settings.json'), '{"enabled":false}\n');
+  // Start from a real installed state: the source marketplace and Codex's
+  // installed plugin cache both use HTTP, then the saved choice becomes stdio.
+  const installed = await preparePlugin(repo.home, { root: marketplace, transport: 'http' });
+  await runFixture(recordedCodex, ['plugin', 'marketplace', 'add', marketplace]);
+  await runFixture(recordedCodex, ['plugin', 'add', installed.selector]);
+  const cacheManifest = join(codexHome, 'plugins', 'cache', 'codex-to-agents-local', 'agents-board', '0.1.0', '.mcp.json');
+  assert.equal(await boardMode(join(installed.plugin, '.mcp.json')), 'http');
+  assert.equal(await boardMode(cacheManifest), 'http', 'the fixture mirrors the installed plugin cache');
+  await saveTransport(repo.home, 'stdio');
+  await writeFile(join(repo.home, 'plugin-installation.json'), JSON.stringify({ codex: recordedCodex }));
+  const latest = await repo.commit({ 'src/feature.txt': 'update\n' });
+  await check(repo.home, repo.dependencies());
+  const calls = [];
+  const dependencies = repo.dependencies({
+    dshHome,
+    install: context => installProjectUpdate(context, {
+      root: marketplace,
+      register: async (homePath, executable, transport) => { calls.push({ homePath, executable, transport }); },
+      prepareDshExtension: async () => join(marketplace, 'dsh', 'extension.mjs'),
+    }),
+  });
+  try {
+    const applying = await start(repo.home, 'apply', dependencies);
+    assert.equal(applying.status, 'updating');
+    const result = await settle(repo.home);
+    assert.equal(result.status, 'updated');
+    assert.equal(await repo.head(), latest);
+    assert.equal(calls.length, 1, 'the update refreshes the global model entry');
+    assert.equal(await realpath(calls[0].homePath), await realpath(repo.home));
+    assert.equal(calls[0].executable, recordedCodex, 'the recorded Codex executable is reused');
+    assert.equal(calls[0].transport, 'stdio', 'the update reuses the saved transport');
+
+    const board = JSON.parse(await readFile(join(marketplace, 'plugins', 'agents-board', '.mcp.json'), 'utf8'));
+    const connection = board.mcpServers.agents_board;
+    assert.ok(connection.command, 'the board manifest follows the saved stdio transport');
+    assert.equal(connection.url, undefined);
+    assert.equal(connection.http_headers_helper, undefined);
+    assert.equal(await boardMode(cacheManifest), 'stdio',
+      'marketplace add + plugin add refresh the cache Codex actually installed');
+  } finally {
+    await stopBackend(repo.home).catch(() => {});
   }
 });

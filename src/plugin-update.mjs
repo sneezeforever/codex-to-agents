@@ -6,6 +6,7 @@ import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OrderBook } from './orders.mjs';
 import { EXECUTORS } from './executors.mjs';
+import { resolveTransport } from './transport.mjs';
 import { autoUpdateSetting } from './update-reminder.mjs';
 
 // Board-only update backend. The board never lets a client supply a repository
@@ -91,6 +92,14 @@ async function atomicJson(path, value) {
     await writeFile(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     await rename(temporary, path);
   } finally { await rm(temporary, { force: true }).catch(() => {}); }
+}
+
+async function readInstallation(home) {
+  let value;
+  try { value = JSON.parse(await readFile(join(home, 'plugin-installation.json'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || typeof value.codex !== 'string' || !value.codex) return null;
+  return value;
 }
 
 async function readStateFile(home) {
@@ -793,7 +802,9 @@ async function exists(path) {
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 
-async function installProjectUpdate({ home, repoRoot, previous, latest, force_dependencies, dshHome, npm_cli }) {
+export async function installProjectUpdate({ home, repoRoot, previous, latest, force_dependencies, dshHome, npm_cli }, {
+  root, register, runCodex, prepareDshExtension: prepareExtension,
+} = {}) {
   const current = await packageFingerprints(repoRoot);
   const changed = current.package_json !== previous?.package_json || current.package_lock !== previous?.package_lock;
   const dependenciesInstalled = Boolean(force_dependencies) || changed || !await exists(join(repoRoot, 'node_modules'));
@@ -804,11 +815,24 @@ async function installProjectUpdate({ home, repoRoot, previous, latest, force_de
     const npmCli = npm_cli ?? await resolveNpmCli(repoRoot);
     await runCommand(process.execPath, [npmCli, 'ci', '--no-audit', '--no-fund'], { cwd: repoRoot, timeout: INSTALL_TIMEOUT_MS });
   }
-  const [{ preparePlugin }, { prepareDshExtension }] = await Promise.all([
+  const [{ preparePlugin }, { prepareDshExtension, registerMcp, codex: runCodexCommand }] = await Promise.all([
     import('./plugin.mjs'), import('./command.mjs'),
   ]);
-  const plugin = await preparePlugin(home);
-  const module = await prepareDshExtension();
+  // An upgrade must not leave the board and the dispatch endpoint on different
+  // transports: both use the saved/default choice, and the model entry is
+  // re-registered through the Codex executable recorded by plugin-install.
+  const transport = await resolveTransport(home);
+  const installation = await readInstallation(home);
+  const executable = installation?.codex ?? 'codex';
+  const plugin = await preparePlugin(home, { transport, ...(root ? { root } : {}) });
+  await (register ?? registerMcp)(home, executable, transport);
+  // Regenerating the source marketplace alone does not refresh the copy Codex
+  // already installed. Re-run the same CLI install steps so the cached plugin
+  // manifest picks up the selected transport too.
+  const invoke = runCodex ?? runCodexCommand;
+  await invoke(['plugin', 'marketplace', 'add', plugin.root], executable);
+  await invoke(['plugin', 'add', plugin.selector], executable);
+  const module = prepareExtension ? await prepareExtension() : await prepareDshExtension();
   const dsh = await refreshDshProfile(home, module, {
     dshHome: dshHome ? resolve(dshHome) : join(homedir(), '.dsh'),
   });

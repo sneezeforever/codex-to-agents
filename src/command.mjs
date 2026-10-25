@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { namedNode, processName } from './processes.mjs';
+import { parseTransport, resolveTransport, saveTransport } from './transport.mjs';
 
 const begin = '# BEGIN CODEX TO AGENTS';
 const end = '# END CODEX TO AGENTS';
@@ -58,22 +59,36 @@ async function backup(home, files) {
   return target;
 }
 
-function codex(args, executable) {
+export function codex(args, executable) {
   const result = spawnSync(executable ?? 'codex', args, { encoding: 'utf8' });
   if (result.error) throw result.error;
   if (result.status) throw new Error((result.stderr || result.stdout).trim());
 }
 
-async function registerMcp(home, executable) {
-  const { backendConnection } = await import('./backend-control.mjs');
-  const connection = await backendConnection(home, '/mcp');
-  codex(['mcp', 'add', 'codex-to-agents', '--url', connection.url], executable);
+export async function registerMcp(home, executable, transport) {
+  const selected = await resolveTransport(home, transport);
+  const { connectionConfig } = await import('./backend-control.mjs');
+  const connection = await connectionConfig(home, selected, '/mcp');
+  if (selected === 'stdio') {
+    codex(['mcp', 'add', 'codex-to-agents', '--', connection.command, ...connection.args], executable);
+  } else {
+    codex(['mcp', 'add', 'codex-to-agents', '--url', connection.url], executable);
+  }
   const path = join(process.env.CODEX_HOME ?? join(homedir(), '.codex'), 'config.toml');
   const text = await readFile(path, 'utf8');
   const header = /^\[mcp_servers\.(?:codex-to-agents|"codex-to-agents")\]\r?$/m;
   if (!header.test(text)) throw new Error('Codex did not save the shared MCP configuration.');
-  await writeFile(path, text.replace(header, match => `${match}\nhttp_headers_helper = ${JSON.stringify(connection.http_headers_helper)}`), { mode: 0o600 });
+  if (selected === 'http') {
+    await writeFile(path, text.replace(header, match => `${match}\nhttp_headers_helper = ${JSON.stringify(connection.http_headers_helper)}`), { mode: 0o600 });
+  }
+  return { transport: selected };
 }
+
+const boardSync = transport => ({
+  transport,
+  board_sync_required: true,
+  board_sync_hint: `运行 node src/command.mjs plugin-install 让现有 Agents 看板同步为 ${transport} 传输。`,
+});
 
 async function readSettings(home) {
   try { return JSON.parse(await readFile(join(home, 'settings.json'), 'utf8')); }
@@ -117,6 +132,9 @@ export async function install(options, { register = registerMcp } = {}) {
   const { OrderBook } = await import('./orders.mjs');
   const { isExecutor, EXECUTORS } = await import('./executors.mjs');
   const home = resolve(options.home);
+  // Resolve before creating any directories so a bad or damaged transport
+  // preference cannot leave a half-changed install behind.
+  const transport = options.action === 'disable' ? null : await resolveTransport(home, options.transport);
   const book = new OrderBook(home);await book.open();
   const previous = await readSettings(home);
   if (options.executor && !isExecutor(options.executor)) throw new Error(`executor must be one of ${EXECUTORS.join(', ')}.`);
@@ -127,12 +145,17 @@ export async function install(options, { register = registerMcp } = {}) {
     else {
       settings.qoder = await qoderSettings({ ...options, home });
       await mkdir(settings.qoder.defaultDirectory, { recursive: true });
-      await register(home, options.codex);
+      await register(home, options.codex, transport);
     }
     await book.atomic(join(home, 'settings.json'), settings);
+    // Commit the preference only after every installer step succeeded. The
+    // register call above already used the explicit value, so a failed CLI
+    // registration leaves the previous saved choice untouched.
+    if (options.action !== 'disable' && options.transport !== undefined) await saveTransport(home, transport);
     const dsh = await book.runtime();
     return { executor: 'qoder', configured: options.action !== 'disable', backup: saved,
       ...(settings.qoder ? { executable: settings.qoder.executable, version: settings.qoder.version } : {}),
+      ...(options.action === 'disable' ? {} : boardSync(transport)),
       mcp: 'codex-to-agents', restart_mcp_required: true, login_required: options.action !== 'disable',
       dsh_reload_required: Boolean(dsh.snapshot?.active && dsh.snapshot.protocol !== 2), order_history_retained: true };
   }
@@ -143,11 +166,13 @@ export async function install(options, { register = registerMcp } = {}) {
     else {
       settings.hermes = await hermesSettings({ ...options, home });
       await mkdir(settings.hermes.defaultDirectory, { recursive: true });
-      await register(home, options.codex);
+      await register(home, options.codex, transport);
     }
     await book.atomic(join(home, 'settings.json'), settings);
+    if (options.action !== 'disable' && options.transport !== undefined) await saveTransport(home, transport);
     const dsh = await book.runtime();
     return { executor: 'hermes', configured: options.action !== 'disable', backup: saved,
+      ...(options.action === 'disable' ? {} : boardSync(transport)),
       mcp: 'codex-to-agents', restart_mcp_required: true, dsh_reload_required: Boolean(dsh.snapshot?.active && dsh.snapshot.protocol !== 2),
       order_history_retained: true };
   }
@@ -171,10 +196,33 @@ export async function install(options, { register = registerMcp } = {}) {
   // imports when Cordis reloads the plugin in an already-running desktop.
   const module = await prepareDshExtension();
   const next = stripExtension(original).trimEnd() + '\n\n' + extensionBlock(settings, module);
-  await register(home, options.codex);
+  await register(home, options.codex, transport);
   await writeFile(join(home, 'settings.json'), JSON.stringify(settings, null, 2), { mode: 0o600 });
   await writeFile(profile, next);
-  return { configured: true, profile, home, mcp: 'codex-to-agents', backup: saved };
+  if (options.transport !== undefined) await saveTransport(home, transport);
+  return { configured: true, profile, home, mcp: 'codex-to-agents', backup: saved, ...boardSync(transport) };
+}
+
+export async function pluginInstall(options, { root, register = registerMcp, runCodex = codex } = {}) {
+  const [{ OrderBook }, { preparePlugin }] = await Promise.all([import('./orders.mjs'), import('./plugin.mjs')]);
+  const home = resolve(options.home);
+  const transport = await resolveTransport(home, options.transport);
+  const book = new OrderBook(home);await book.open();
+  const saved = await backup(home, { 'codex.toml': join(homedir(), '.codex/config.toml') });
+  // Refresh the dispatch entry before touching the board manifest, so a failed
+  // registration does not leave the installed board pointing at a new
+  // transport while the saved preference (and model entry) stay old.
+  await register(home, options.codex, transport);
+  const plugin = await preparePlugin(home, { transport, ...(root ? { root } : {}) });
+  await runCodex(['plugin', 'marketplace', 'add', plugin.root], options.codex);
+  await runCodex(['plugin', 'add', plugin.selector], options.codex);
+  await book.atomic(join(home, 'plugin-installation.json'), { codex: options.codex ?? 'codex' });
+  // Persist the explicit choice last: a failed MCP registration or plugin
+  // install must not silently switch the transport used by later reinstall and
+  // update commands. preparePlugin/register already received the selected value.
+  if (options.transport !== undefined) await saveTransport(home, transport);
+  return { installed: true, ...plugin, backup: saved, restart_codex_required: true,
+    hook_trust_required: true, automatic_delegation: 'unchanged; off when not configured' };
 }
 
 export async function main(args = process.argv.slice(2)) {
@@ -183,9 +231,11 @@ export async function main(args = process.argv.slice(2)) {
     directory: { type: 'string' }, profile: { type: 'string' }, 'dsh-home': { type: 'string' }, codex: { type: 'string' },
     executor: { type: 'string' }, 'hermes-url': { type: 'string' }, 'hermes-token-env': { type: 'string' },
     'qoder-executable': { type: 'string' },
+    transport: { type: 'string' },
     web: { type: 'boolean' }, once: { type: 'boolean' }, json: { type: 'boolean' }, 'panel-only': { type: 'boolean' },
     interval: { type: 'string', default: '1000' }, limit: { type: 'string', default: '30' }, port: { type: 'string', default: '18862' },
   } });
+  parseTransport(values.transport);
   const [command] = positionals;
   process.title = processName(command, values);
   if (command === 'serve') {
@@ -215,17 +265,7 @@ export async function main(args = process.argv.slice(2)) {
     const { runDelegationHook } = await import('./delegation.mjs');
     await runDelegationHook(resolve(values.home));
   } else if (command === 'plugin-install') {
-    const [{ OrderBook }, { preparePlugin }] = await Promise.all([import('./orders.mjs'), import('./plugin.mjs')]);
-    const home = resolve(values.home);
-    const book = new OrderBook(home);await book.open();
-    const saved = await backup(home, { 'codex.toml': join(homedir(), '.codex/config.toml') });
-    const plugin = await preparePlugin(home);
-    await registerMcp(home, values.codex);
-    codex(['plugin', 'marketplace', 'add', plugin.root], values.codex);
-    codex(['plugin', 'add', plugin.selector], values.codex);
-    await book.atomic(join(home, 'plugin-installation.json'), { codex: values.codex ?? 'codex' });
-    console.log(JSON.stringify({ installed: true, ...plugin, backup: saved, restart_codex_required: true,
-      hook_trust_required: true, automatic_delegation: 'unchanged; off when not configured' }, null, 2));
+    console.log(JSON.stringify(await pluginInstall(values), null, 2));
   } else if (command === 'worker') {
     if (values.executor === 'qoder') {
       const { startQoderWorker } = await import('./qoder-worker.mjs');
@@ -265,7 +305,7 @@ export async function main(args = process.argv.slice(2)) {
     const { OrderBook } = await import('./orders.mjs');
     const book = new OrderBook(resolve(values.home));await book.open();
     console.log(JSON.stringify({ ...await book.runtimes(), orders: (await book.list()).length }, null, 2));
-  } else console.log('Commands: serve | plugin-install | backend start|stop|restart|status | enable --provider PROVIDER | enable --executor hermes | enable --executor qoder | disable [--executor hermes|qoder] | worker --executor hermes|qoder | status | monitor\nHermes: --hermes-url http://127.0.0.1:9120 --hermes-token-env VARIABLE\nQoder: enable --executor qoder [--qoder-executable /absolute/path/to/qodercli] [--directory DIR]\nMonitor: --web --port 18862 | --once | --json | --interval 1000 --limit 30\nOptions: --home DIR --directory DIR --profile desktop --dsh-home DIR --codex EXECUTABLE');
+  } else console.log('Commands: serve | plugin-install | backend start|stop|restart|status | enable --provider PROVIDER | enable --executor hermes | enable --executor qoder | disable [--executor hermes|qoder] | worker --executor hermes|qoder | status | monitor\nTransport: --transport stdio|http (default stdio; an explicit choice is saved and reused by plugin-install and updates)\nHermes: --hermes-url http://127.0.0.1:9120 --hermes-token-env VARIABLE\nQoder: enable --executor qoder [--qoder-executable /absolute/path/to/qodercli] [--directory DIR]\nMonitor: --web --port 18862 | --once | --json | --interval 1000 --limit 30\nOptions: --home DIR --directory DIR --profile desktop --dsh-home DIR --codex EXECUTABLE');
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === entry) {

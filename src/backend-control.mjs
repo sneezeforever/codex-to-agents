@@ -83,6 +83,26 @@ export async function backendConnection(home, path) {
   return { url: backend.url + path, http_headers_helper: [node, entry, 'backend-headers', '--home', resolve(home)].map(quote).join(' ') };
 }
 
+// The stdio entry is a protocol bridge, not a second execution service: it
+// forwards each MCP message to the same authenticated shared backend. Command
+// and args stay separate so spaces, quotes and non-ASCII data-directory paths
+// never pass through a shell.
+export async function stdioConnection(home, path, { node = process.execPath } = {}) {
+  const name = path === '/board' ? 'agents-board' : path === '/mcp' ? 'agents-mcp' : null;
+  if (!name) throw new Error('Unknown MCP endpoint.');
+  const command = await namedNode(home, name, { node });
+  return {
+    command,
+    args: [entry, 'serve', '--home', resolve(home), ...(path === '/board' ? ['--panel-only'] : [])],
+  };
+}
+
+export async function connectionConfig(home, transport, path, options) {
+  if (transport === 'stdio') return stdioConnection(home, path, options);
+  if (transport === 'http') return backendConnection(home, path);
+  throw new Error('--transport must be stdio or http.');
+}
+
 export async function bridgeStdio(home, { panelOnly = false, input = process.stdin, output = process.stdout } = {}) {
   const { createInterface } = await import('node:readline');
   const backend = await ensureBackend(home);
@@ -99,8 +119,13 @@ export async function bridgeStdio(home, { panelOnly = false, input = process.std
       if (!response.ok) throw new Error('Shared backend rejected the request.');
       if (response.status !== 202) output.write(await response.text() + '\n');
     } catch {
-      if (message.id !== undefined) output.write(JSON.stringify({ jsonrpc: '2.0', id: message.id,
-        error: { code: -32603, message: 'Shared backend could not confirm this operation. Inspect the original work order before retrying.' } }) + '\n');
+      if (message.id !== undefined) {
+        const messageText = message.method === 'tools/call'
+          ? 'Shared backend could not confirm this operation. Inspect the original work order before retrying.'
+          : 'Shared backend is unavailable. Check backend status and backend.log; the transport was not changed automatically.';
+        output.write(JSON.stringify({ jsonrpc: '2.0', id: message.id,
+          error: { code: -32603, message: messageText } }) + '\n');
+      }
     }
   }
 }

@@ -3,19 +3,21 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OrderBook } from './orders.mjs';
 import { namedNode } from './processes.mjs';
-import { backendConnection } from './backend-control.mjs';
+import { connectionConfig } from './backend-control.mjs';
+import { resolveTransport } from './transport.mjs';
 
 const entry = fileURLToPath(new URL('./command.mjs', import.meta.url));
 const quote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 
 // A local plugin deliberately points to the installed checkout and Node
 // executable. This avoids copying node_modules into Codex's plugin cache.
-export async function preparePlugin(home, { root = fileURLToPath(new URL('../.local/plugin-marketplace/', import.meta.url)), node = process.execPath } = {}) {
+export async function preparePlugin(home, { transport, root = fileURLToPath(new URL('../.local/plugin-marketplace/', import.meta.url)), node = process.execPath } = {}) {
   home = resolve(home);root = resolve(root);
   const plugin = join(root, 'plugins', 'agents-board');
   const book = new OrderBook(home);
+  const selected = await resolveTransport(home, transport);
   const [connection, hookNode] = await Promise.all([
-    backendConnection(home, '/board'), namedNode(home, 'agents-hook', { node }),
+    connectionConfig(home, selected, '/board', { node }), namedNode(home, 'agents-hook', { node }),
   ]);
   await Promise.all([mkdir(join(root, '.agents', 'plugins'), { recursive: true }),
     mkdir(join(plugin, '.codex-plugin'), { recursive: true }), mkdir(join(plugin, 'hooks'), { recursive: true })]);
@@ -39,5 +41,5 @@ export async function preparePlugin(home, { root = fileURLToPath(new URL('../.lo
       policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' }, category: 'Developer Tools',
     }],
   });
-  return { root, plugin, selector: 'agents-board@codex-to-agents-local' };
+  return { root, plugin, selector: 'agents-board@codex-to-agents-local', transport: selected };
 }

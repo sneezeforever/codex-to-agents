@@ -625,8 +625,12 @@ test('plugin package points at working runtime and hook quotes task paths safely
   const manifest = JSON.parse(await readFile(join(plugin.plugin, '.codex-plugin/plugin.json')));
   assert.equal(manifest.hooks, './hooks/hooks.json');
   const mcp = JSON.parse(await readFile(join(plugin.plugin, '.mcp.json')));
-  assert.ok(mcp.mcpServers.agents_board.url.endsWith('/board'));
-  assert.ok(mcp.mcpServers.agents_board.http_headers_helper.includes('backend-headers'));
+  const board = mcp.mcpServers.agents_board;
+  assert.ok(board.command);
+  assert.deepEqual(board.args.slice(1, 3), ['serve', '--home']);
+  assert.ok(board.args.includes('--panel-only'));
+  assert.equal(board.url, undefined);
+  assert.equal(board.http_headers_helper, undefined);
   const hook = JSON.parse(await readFile(join(plugin.plugin, 'hooks/hooks.json'))).hooks.UserPromptSubmit[0].hooks[0];
   const { stdout } = await run('/bin/sh', ['-c', hook.command], { input: '' });
   assert.match(JSON.parse(stdout).hookSpecificOutput.additionalContext, /当前为关闭/);

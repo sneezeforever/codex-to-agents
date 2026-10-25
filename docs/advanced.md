@@ -19,6 +19,7 @@
 | `--hermes-url` | Hermes 接入 | 默认 `http://127.0.0.1:9120`，仅支持本机 loopback Dashboard |
 | `--hermes-token-env` | Hermes 接入 | 可选，存放 Dashboard token 的环境变量名 |
 | `--qoder-executable` | Qoder 接入 | 自动在本机查找 Qoder CLI；也可传入绝对路径 |
+| `--transport` | `enable`、`plugin-install` | `stdio` 或 `http`；未保存过选择时默认 `stdio`；显式选择保存在数据目录并用于重装、看板安装和更新 |
 
 下面以 Hermes Dashboard 运行在本机 9121 端口为例：
 
@@ -44,6 +45,17 @@ DSH 的 `--provider '*'` 是显式启用全部已加载提供方的模式，请�
 可先调用 `runtime_info` 查看提供方与模型 ID。显式指定模型时，使用目录返回的 ID；目录表示已配置，不保证模型凭据或上游服务此刻可用。
 
 Hermes 的本地 Dashboard 临时 token 仅在内存中使用，不保存到工作单或配置。使用 `--hermes-token-env` 时，环境变量需对运行后台的进程可见；它不是模型 API 密钥。当前不支持远程 OAuth Dashboard 或切换 Hermes profile。
+
+## 连接传输与代理
+
+`enable` 和 `plugin-install` 都接受 `--transport stdio|http`，规则一致：
+
+- **stdio（默认）**：Codex 启动 `src/command.mjs serve` 桥接；看板连接额外带 `--panel-only`。命令和参数分开传递，不经过 shell，因此数据目录含空格、单引号或中文也可用。桥接读取本机私有凭据，通过后台原有鉴权转发 MCP 消息，stdout 只输出协议内容。每个连接有一个轻量桥接进程，但所有连接仍复用同一个共享后台和执行消费者。
+- **HTTP**：Codex 直接连接 `127.0.0.1` 上的 `/mcp` 或 `/board`，使用 `http_headers_helper` 按需启动后台并提供鉴权头。URL、插件 manifest 和命令行都不包含 token。HTTP 直连不会自动绕过宿主代理；若 `ALL_PROXY` 等代理未排除回环地址，请改用 stdio，或在宿主环境中自行放行 `127.0.0.1`/`localhost`。本工程不修改任何代理环境变量。
+
+没有显式选择且数据目录没有保存值时使用 stdio。显式 `--transport` 会校验后写入数据目录的 `transport.json`，之后的重装、`plugin-install` 和看板更新都沿用该值。非法值在安装副作用前拒绝；保存文件损坏时会明确报错并保持原安装不变，不会静默换传输。切换传输不会自动重放状态不确定的任务，失败后先用原工作单编号核查。
+
+`enable` 只注册或更新派工 MCP 连接，不会重写已安装看板的插件 manifest；返回结果会带 `board_sync_required` 和提示。要让现有看板使用同一传输，需再运行一次 `plugin-install`。`plugin-install` 会同时生成 `/mcp` 与 `/board` 的同一传输配置，不会混用两种字段。
 
 ## 自动派工设置
 
@@ -185,11 +197,11 @@ node src/command.mjs backend restart
 node src/command.mjs backend stop
 ```
 
-同一数据目录的 `/mcp` 派工连接和 `/board` 看板连接共用一个 `agents-backend`。后台仅监听 `127.0.0.1`；Codex 的 `http_headers_helper` 在建立连接时确保后台已启动，并提供本机私有认证头。认证值保存在 `backend-auth.json`，权限为 `0600`，不放进 URL 或插件配置。
+同一数据目录的 `/mcp` 派工连接和 `/board` 看板连接共用一个 `agents-backend`，无论它们使用 stdio 桥接还是 HTTP 直连。后台仅监听 `127.0.0.1`；HTTP 模式的 `http_headers_helper` 在建立连接时确保后台已启动，并提供本机私有认证头。认证值保存在 `backend-auth.json`，权限为 `0600`，不放进 URL 或插件配置。stdio 桥接也读取同一凭据，并复用同一个后台、工作单和租约。
 
 重启复用原端口，保留工作单和会话记录。DSH、Hermes 已接收的原生任务可继续运行；Qoder CLI 子进程会随消费者关闭而终止，尚未确认的结果保持待核查，不会自动重放。停止后台不会卸载插件；之后新建 MCP 连接会按需启动后台。
 
-旧 `serve` 命令保留为 stdio 到共享 HTTP 后台的轻量转发。旧命令显式传入 `--hermes-url` 时，会将该设置保存为数据目录共用的 Hermes 配置。
+`serve` 命令（可加 `--panel-only`）是 stdio 传输使用的入口，也是到共享 HTTP 后台的轻量转发。显式传入 `--hermes-url` 时，会将该设置保存为数据目录共用的 Hermes 配置。
 
 共享后台会处理尚未完成的 Hermes 工作，关闭某个客户端不会停止它。需要单独在前台调试消费者时，可运行：
 
@@ -231,13 +243,13 @@ node src/command.mjs plugin-install
 node src/command.mjs backend restart
 ```
 
-只使用派工工具时，可以重新执行对应执行端的 `enable` 代替安装看板。更新 DSH 插件源码后，需要重新执行 DSH 接入命令并重启 DSH，使其载入新的代码快照。
+已保存的 `stdio`/`http` 选择会被自动沿用，无需再次传入 `--transport`。只使用派工工具时，可以重新执行对应执行端的 `enable` 代替安装看板；`enable` 会沿用已保存传输，但不会刷新既有看板，需要看板同步时仍要运行 `plugin-install`。更新 DSH 插件源码后，需要重新执行 DSH 接入命令并重启 DSH，使其载入新的代码快照。
 
-看板折叠的「插件更新」区可检查并安装 GitHub 默认分支更新。看板首次可见且连接成功时调用 `check_daily`，多个看板通过本地数据目录共享检查记录，每 24 小时最多自动检查一次；失败也计入尝试。近期手动检查会抑制重复自动检查，尚未完成的安装先保留恢复入口。有新版时折叠栏显示提示，由用户决定是否安装；手动「检查更新」不受自动检查间隔限制。单独查看状态只读取本地缓存，不访问远端。
+看板折叠的「插件更新」区可检查并安装 GitHub 默认分支更新。安装更新会同时重建看板连接，并使用 `plugin-installation.json` 中记录的 Codex 路径刷新派工连接、重新执行插件的 `marketplace add`/`plugin add`，让 Codex 已安装的插件缓存也切换到同一个传输；三者沿用同一个已保存传输。若注册或插件安装失败，更新会报告安装失败并保留重试入口，不提交新的传输选择。看板首次可见且连接成功时调用 `check_daily`，多个看板通过本地数据目录共享检查记录，每 24 小时最多自动检查一次；失败也计入尝试。近期手动检查会抑制重复自动检查，尚未完成的安装先保留恢复入口。有新版时折叠栏显示提示，由用户决定是否安装；手动「检查更新」不受自动检查间隔限制。单独查看状态只读取本地缓存，不访问远端。
 
 检查与安装由后台助手执行，看板在操作后做有限的状态查询；预算用尽而更新仍在进行时提供只读「刷新状态」重查本地缓存，不新增常驻轮询。临时连接中断按可重试的读取错误提示，不宣告安装失败。若上次依赖或本地插件安装未完成，状态会带 `pending_install` 并保留「安装更新」重试入口，重试只补安装、不重复合并代码。安装只在本机安装目录的当前分支可快进、且没有 tracked/staged 改动和正在运行的任务时执行；存在本地改动、分叉、离线或忙碌时会阻止并说明原因。更新不使用 stash、reset 或强推，也不删除未跟踪的 SDD 文档。完成后需要重新加载 Codex 或重启 DSH 才能使用新版本，本工程不会自动重启原生应用。该能力通过仅应用可见的 `panel_update` 提供，模型工具目录不包含它。
 
-从旧版 stdio 连接升级时，重启 Codex 以载入新的 HTTP 配置。若 DSH 仍运行不区分执行端的旧消费者，系统会拒绝保存 Hermes 单据；重新启用 DSH 并重启它后再试。
+从旧版升级时，如果数据目录还没有保存的传输选择，重装和看板安装会采用默认 stdio；需要继续使用 HTTP 时，在首次 `enable` 或 `plugin-install` 加上 `--transport http`，之后会沿用该选择。重启 Codex 以载入新的连接配置。若 DSH 仍运行不区分执行端的旧消费者，系统会拒绝保存 Hermes 单据；重新启用 DSH 并重启它后再试。
 
 ### 停用某个执行端
 
@@ -275,7 +287,7 @@ node src/command.mjs disable --executor qoder
 npm test
 ```
 
-覆盖工作单发布与幂等提交、消费者排他、恢复、模型限制、结果关联、HTTP 共享后台、stdio 转发、看板隐藏/恢复、模型偏好与三端新会话权限保存、Hook 就绪检查、SDD 开关独立持久化与关闭时拒绝写入，以及已完成历史缓存与增量更新。Qoder 的提交、续聊、取消和错误处理由隔离 CLI 夹具验证。这不等于所有模型和客户端组合都完成业务验收。
+覆盖工作单发布与幂等提交、消费者排他、恢复、模型限制、结果关联、HTTP 共享后台、stdio 转发、传输选择持久化与损坏拒绝、代理环境下 stdio 连接、看板隐藏/恢复、模型偏好与三端新会话权限保存、Hook 就绪检查、SDD 开关独立持久化与关闭时拒绝写入，以及已完成历史缓存与增量更新。Qoder 的提交、续聊、取消和错误处理由隔离 CLI 夹具验证。这不等于所有模型和客户端组合都完成业务验收。
 
 DSH 实机脚本：
 
