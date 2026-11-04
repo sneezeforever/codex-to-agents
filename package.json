@@ -12,5 +12,5 @@
     "dashboard": "node src/command.mjs monitor --web",
     "test": "node --test test/*.test.mjs"
   },
-  "dependencies": { "@modelcontextprotocol/sdk": "1.31.0", "zod": "4.6.5" }
+  "dependencies": { "@modelcontextprotocol/sdk": "1.31.0", "zod": "4.6.7" }
 }
