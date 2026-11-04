@@ -1,6 +1,7 @@
 {
   "name": "@yichen/codex-to-agents",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "description": "让 Codex 指挥 agents 干活：拆解任务、派工、跟进进度并验收结果。",

@@ -1,6 +1,6 @@
 # Codex to Agents
 
-[简体中文](README.md) | **English**
+[简体中文](README.md) | **English** | [MIT License](LICENSE)
 
 Codex to Agents is a Codex plugin that delegates concrete coding tasks to **DeepSeek Harness (DSH)**, **Hermes Agent CN Desktop**, or **Qoder CLI**. Codex plans the work, follows up, and verifies the result, while a local Agents dashboard in Codex controls whether and where tasks are dispatched. The dashboard also manages SDD task documents and checks for plugin updates.
 

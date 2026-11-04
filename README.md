@@ -2,7 +2,7 @@
 
 **让 Codex 指挥 agents 干活。**
 
-**简体中文** | [English](README.en.md)
+**简体中文** | [English](README.en.md) | [MIT 许可证](LICENSE)
 
 Codex 多 Agent 派工插件：把具体编码任务交给 **DeepSeek Harness（DSH）**、**Hermes Agent CN Desktop** 或 **Qoder CLI（Qoder）**，由 Codex 负责规划、跟进与验收。Agents 看板可设置执行端、模型、思考强度与权限，管理 SDD 任务文档，并提供插件更新入口。
 
