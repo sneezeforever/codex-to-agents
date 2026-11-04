@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { HermesClient, hermesUrl } from '../src/hermes-client.mjs';
 
 async function fixture(t, timeout = 2000) {
   const requests = [];
   const sockets = [];
-  const state = { token: 'ephemeral-test-token', reply: message => ({ jsonrpc: '2.0', id: message.id, result: { ok: true } }) };
+  const state = { token: randomUUID(), reply: message => ({ jsonrpc: '2.0', id: message.id, result: { ok: true } }) };
   const server = createServer((req, res) => {
     requests.push({ path: req.url, token: req.headers['x-hermes-session-token'] });
     if (req.url === '/') res.end(`<html><script>window.__HERMES_SESSION_TOKEN__="${state.token}";</script></html>`);
@@ -40,12 +41,12 @@ test('Hermes accepts only loopback origins and refuses credentials, paths and to
 });
 
 test('local Dashboard bootstrap authenticates HTTP and RPC; redirects never forward the session credential', async t => {
-  const { client, requests, sockets } = await fixture(t);
+  const { client, state, requests, sockets } = await fixture(t);
   assert.deepEqual(await client.request('/api/models'), { ok: true });
-  assert.equal(requests[0].token, undefined);assert.equal(requests[1].token, 'ephemeral-test-token');
+  assert.equal(requests[0].token, undefined);assert.equal(requests[1].token, state.token);
   assert.deepEqual(await client.call('session.active_list'), { ok: true });
   assert.equal(new URL(sockets[0].url).pathname, '/api/ws');
-  assert.equal(new URL(sockets[0].url).searchParams.get('token'), 'ephemeral-test-token');
+  assert.equal(new URL(sockets[0].url).searchParams.get('token'), state.token);
   await assert.rejects(client.request('/redirect'), /HTTP connection failed/);
   assert.ok(!requests.some(request => request.path === '/must-not-follow'));
 });
@@ -70,10 +71,12 @@ test('a reconnect refreshes the ephemeral token and forwards only native event f
   const generation = client.generation;
   sockets[0].dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'message.delta', session_id: 'one', payload: { text: 'hi' } } }) }));
   assert.equal(events.length, 1);
-  sockets[0].close();state.token = 'fresh-token';
+  const previousToken = state.token;
+  sockets[0].close();state.token = randomUUID();
   await client.call('session.active_list');
   assert.notEqual(client.generation, generation);
-  assert.equal(new URL(sockets[1].url).searchParams.get('token'), 'fresh-token');
+  assert.notEqual(state.token, previousToken);
+  assert.equal(new URL(sockets[1].url).searchParams.get('token'), state.token);
   sockets[0].dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ method: 'event', params: { type: 'stale' } }) }));
   assert.equal(events.length, 1);
 });
